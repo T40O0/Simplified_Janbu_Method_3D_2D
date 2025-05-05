@@ -1,7 +1,7 @@
 # Slope Stability: Simplified Janbu Method  
 
  - This is a Python port of the following MATLAB code.  
-([Landslide-Forensics](https://github.com/benalesh/Landslide-Forensics))
+([Landslide-Forensics](https://github.com/benalesh/Landslide-Forensics))  
 Bunn, M., Leshchinsky, B., & Olsen, M. J. (2020). Geologic trends in shear strength properties inferred through three-dimensional back analysis of landslide inventories. Journal of Geophysical Research: Earth Surface, 125, https://doi.org/10.1029/2019JF005461
  - 2D back-and-forward analysis added.
 
