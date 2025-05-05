@@ -357,7 +357,7 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
     return rot3d , phi3d_final, c3d_final
 
 # ====================================================
-# SimpJanbu2D (back‐and‐forward analysises)
+# SimpJanbu2D (back‐and‐forward analyses)
 # ====================================================
 def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
                           c0, phi0, W0, u, gs, strength, kx, ky, Ex, Ey,  mode="inverse"):
@@ -648,47 +648,45 @@ def extract_deepest_contiguous_slice(mask, X, Y, rot3d, csize, G, S, Aspect=None
         out[tuple(ij)] = True
 
     """
-    # 可視化（Aspectを含む）
+    # Visualization
 
     if Aspect is not None:
         import matplotlib.pyplot as plt
         from matplotlib.colors import Normalize
-        # 3つのサブプロットを作成
+        # Create 3 subplots
         fig, ax = plt.subplots(1, 3, figsize=(15, 5))
         
-        # 1. 元のマスク
+        # 1. Original mask
         ax[0].imshow(mask, cmap='gray')
         ax[0].set_title('Original Mask')
         ax[0].axis('equal')
         
-        # 2. 抽出された最も深いスライス
+        # 2. Extracted 2D slice
         ax[1].imshow(out, cmap='gray')
         ax[1].set_title('Extracted Deepest Slice')
         ax[1].axis('equal')
         
-        # 3. Aspect（方位角）の可視化
-        # マスク内のAspectのみを表示
+        # 3. Visualization of Aspect
         masked_aspect = np.ma.masked_array(Aspect, ~mask)
         
-        # 方位角は0-360度なので、循環カラーマップを使用
+        # Use circular color map since azimuth is 0-360 degrees
         cmap_aspect = plt.cm.hsv
         norm = Normalize(vmin=0, vmax=360)
         im = ax[2].imshow(masked_aspect, cmap=cmap_aspect, norm=norm)
         ax[2].set_title('Aspect (Direction)')
         ax[2].axis('equal')
         
-        # カラーバーを追加
+        # Add color bar
         cbar = fig.colorbar(im, ax=ax[2])
         cbar.set_label('Direction (degrees)')
         
-        # 指定された走査方向を示す矢印や線を追加
+        # Arrows to indicate scanning direction
         h, w = mask.shape
         center_y, center_x = h//2, w//2
         arrow_length = min(h, w) * 0.2
         dx = arrow_length * np.sin(np.deg2rad(rot3d))
         dy = arrow_length * np.cos(np.deg2rad(rot3d))
         
-        # 走査方向を示す矢印
         ax[2].arrow(center_x, center_y, dx, -dy, 
                    head_width=arrow_length*0.15, 
                    head_length=arrow_length*0.15, 
@@ -728,7 +726,7 @@ def main():
     inPath = 'input'
     outPath="output"
     # Read landslide extents (use attributes.shp for aspect)
-    dep_shp = os.path.join(inPath, '中越崩壊ポリゴン_崩壊域.shp') # <------ input
+    dep_shp = os.path.join(inPath, 'landslide_poly.shp') # <------ input
     F_gdf = gpd.read_file(dep_shp)
     F = F_gdf.to_dict('records')
     print(f"[INFO] Shapefile '{dep_shp}' has been read. (1/5)")
@@ -737,7 +735,7 @@ def main():
     ba_shp = os.path.join(outPath, 'back_analysis.shp') # <------ input
     
     # Read slip surface DEM
-    slip_surf = os.path.join(inPath, 'slide02.tif') # <------ input
+    slip_surf = os.path.join(inPath, 'slide.tif') # <------ input
     with rasterio.open(slip_surf) as src:
         Slip = src.read(1)
         transform = src.transform
@@ -745,13 +743,13 @@ def main():
     print(f"[INFO] TIF file '{slip_surf}' has been read. (2/5)")
 
     # Read ground surfaces（Progressive）
-    dem_surf = os.path.join(inPath, 'DEM10_Bilinear.tif') # <------ input
+    dem_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
     with rasterio.open(dem_surf) as src:
         DEM = src.read(1)
     print(f"[INFO] TIF file '{dem_surf}' has been read. (3/5)")
     
     # TOP also uses the same file (modified as needed)
-    top_surf = os.path.join(inPath, 'DEM10_Bilinear.tif') # <------ input
+    top_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
     with rasterio.open(top_surf) as src:
         TOP = src.read(1)
     print(f"[INFO] TIF file '{top_surf}' has been read. (4/5)")
