@@ -37,7 +37,7 @@ def create_shp_mask(geom, transform, shape):
     rows, cols = shape
     X, Y = worldGrid(transform, shape)
     mask = contains_xy(geom, X.ravel(), Y.ravel())
-    return mask.reshape(rows, cols)  # 明示的に行数、列数を指定
+    return mask.reshape(rows, cols)  # Explicitly specify the number of rows and columns
 
 def safe_float(val):
     """
