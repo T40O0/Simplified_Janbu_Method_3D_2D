@@ -1,4 +1,4 @@
-# Slope Stability: 3D Simplified Janbu Method  
+# Slope Stability: Simplified Janbu Method (3D & 2D)  
 
  - This is a Python port of the following MATLAB code.  
 ([Landslide-Forensics](https://github.com/benalesh/Landslide-Forensics))  
