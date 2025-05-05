@@ -206,12 +206,12 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             if st == 1:
                 phi3d += phi_inc
                 if phi3d >= maxPhi:
-                    # print(f"[Warning] φ has reached its upper limit ({maxPhi}°). Stop inner iteration.")
+                    # print(f" [Warning] φ has reached its upper limit ({maxPhi}°). Stop inner iteration.")
                     break  # Stop iteration
             else:
                 c3d += c_inc
                 if c3d >= maxC:
-                    # print(f"[Warning] c has reached its upper limit ({maxC} kN/m^2). Stop inner iteration.")
+                    # print(f" [Warning] c has reached its upper limit ({maxC} kN/m^2). Stop inner iteration.")
                     break
             iter_count += 1
 
@@ -340,7 +340,7 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
 
     # If neither transverse‐force condition is satisfied (switchA * switchB == 0)
     if switchA * switchB == 0:
-        print("[Warning] could not find a transverse‐force balance in either direction.")
+        print(" [Warning] could not find a transverse‐force balance in either direction.")
 
     if len(FDx_list_3d) >= 2:
         # Take the last two entries
@@ -408,7 +408,7 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
 
     valid_cells = longest_mask & ~np.isnan(W0) & ~np.isnan(dy_vals) & (W0 > 0) & (dy_vals > 0)
     if np.sum(valid_cells) == 0:
-        print("[Warning] No valid cells available") 
+        print(" [Warning] No valid cells available") 
         return phi0, c0
 
     # --------------------------------------------------------------
@@ -456,7 +456,7 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     # --------------------------------------------------------------
     if strength == 'phi':
         """
-        If phi3d (here phi0) does not converge at 1.0 dspite “not insufficient strength” 
+        If phi3d (here phi0) does not converge at 1.0 dspite “not insufficient strength" 
         (i.e. fs_initial >= 1.0), set the search range to 1° to 90° 
         """
         if fs_initial >= target_fs and phi0 == 1.0:
@@ -475,7 +475,7 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
         fs_lower = calc_fs(phi_lower, c0)
         fs_upper = calc_fs(phi_upper, c0)
         if (fs_lower - target_fs) * (fs_upper - target_fs) > 0:
-            print(f"[Warning] There is no condition satisfying FS=1 within the search interval  [{phi_lower}, {phi_upper}] of φ")
+            print(f" [Warning] There is no condition satisfying FS=1 within the search interval  [{phi_lower}, {phi_upper}] of φ")
             return phi0, c0
         
         max_iter = 20
@@ -507,7 +507,7 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
         fs_lower = calc_fs(phi0, c_lower)
         fs_upper = calc_fs(phi0, c_upper)
         if (fs_lower - target_fs) * (fs_upper - target_fs) > 0:
-            print(f"[Warning] There is no condition satisfying FS=1 within the search interval  [{c_lower}, {c_upper}] of c")
+            print(f" [Warning] There is no condition satisfying FS=1 within the search interval  [{c_lower}, {c_upper}] of c")
             return phi0, c0
         
         max_iter = 20
@@ -729,7 +729,7 @@ def main():
     dep_shp = os.path.join(inPath, 'landslide_poly.shp') # <------ input
     F_gdf = gpd.read_file(dep_shp)
     F = F_gdf.to_dict('records')
-    print(f"[INFO] Shapefile '{dep_shp}' has been read. (1/5)")
+    print(f" [Info] Shapefile '{dep_shp}' has been read. (1/5)")
     
     # Name output extents
     ba_shp = os.path.join(outPath, 'back_analysis.shp') # <------ input
@@ -740,25 +740,25 @@ def main():
         Slip = src.read(1)
         transform = src.transform
         csize = src.res[0]  # Assume square cells
-    print(f"[INFO] TIF file '{slip_surf}' has been read. (2/5)")
+    print(f" [Info] TIF file '{slip_surf}' has been read. (2/5)")
 
     # Read ground surfaces（Progressive）
     dem_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
     with rasterio.open(dem_surf) as src:
         DEM = src.read(1)
-    print(f"[INFO] TIF file '{dem_surf}' has been read. (3/5)")
+    print(f" [Info] TIF file '{dem_surf}' has been read. (3/5)")
     
     # TOP also uses the same file (modified as needed)
     top_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
     with rasterio.open(top_surf) as src:
         TOP = src.read(1)
-    print(f"[INFO] TIF file '{top_surf}' has been read. (4/5)")
+    print(f" [Info] TIF file '{top_surf}' has been read. (4/5)")
     
     # Calculate slip surface slope, aspect（gradient_king function）
     SLOPE, ASPECT, DX_arr, DY_arr = gradient_king(Slip, csize)
     shape_img = Slip.shape  # (rows, cols)
     X, Y = worldGrid(transform, shape_img)
-    print(f"[INFO] Slip surface slope calculation and grid creation completed. (5/5)")
+    print(f" [Info] Slip surface slope calculation and grid creation completed. (5/5)")
     
     
     # List to store continuous cross sections (converted to polylines) used in 2D analysis.
@@ -783,7 +783,7 @@ def main():
             x_inside = X[mask]
             y_inside = Y[mask]
             if x_inside.size == 0 or y_inside.size == 0:
-                print(f"Slide {idx+1}: No data within the mask (skipped)”)
+                print(f"Slide {idx+1}: No data within the mask (skipped)")
                 feature['skip_reason'] = "No data within the mask"
                 feature['c3d']    = 0.0
                 feature['phi3d']  = 0.0
@@ -1052,7 +1052,7 @@ def main():
     polyline_gdf = gpd.GeoDataFrame(polyline_features, geometry='geometry', crs=F_gdf.crs)
     polyline_shp = os.path.join(outPath, '2D_stability_polyline.shp')
     polyline_gdf.to_file(polyline_shp)
-    print(f"[INFO] Save polyline shapefile '{polyline_shp}'")
+    print(f" [Info] Save polyline shapefile '{polyline_shp}'")
     
     # Create φ3d histogram and output to CSV
     phi3d_arr = np.array([feature.get('phi3d', 0) for feature in F])
