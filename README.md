@@ -16,10 +16,10 @@ This project requires the following Python packages (with versions tested):
  - shapely    2.1.0
 
 ## Features
- - The slip direction and c or φ can be obtained by back-calculation using the simplified 3D Janbu method.
- - 2D inverse calculation is possible for the slip direction calculated in 3D.
+ - The slip direction and c or φ can be calculated by 3D back analysis using the simplified Janbu method.
+ - 2D back calculation is possible for the slip direction calculated in 3D.
  - Forward calculation in 2D is possible for the slip direction, c and φ calculated in 3D.
- - Saves c, φ, safety factor FS and slip direction as histogram, csv and shapefile.
+ - Saves c, φ, FS and slip direction as histogram, csv and shapefile.
 
 ## Acknowledgments
 Special thanks to Michael Bunn, Ben Leshchinsky, and Michael J. Olsen, whose work (Bunn et al., 2020) laid the foundation for this code. Their original research and MATLAB code were  invaluable in the development of this Python port.
