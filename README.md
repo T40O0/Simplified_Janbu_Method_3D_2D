@@ -22,7 +22,7 @@ This project requires the following Python packages (with versions tested):
  - Saves c, φ, FS and slip direction as histogram, csv and shapefile.
 
 ## References
-Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Proc., Japanese Soc. of Civ. Engrs., Tokyo, 394/III-9, 21–26 (in Japanese).  
+Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Japanese Soc. of Civ. Engrs., 394, 21–26 (in Japanese).  
 Hungr, O., Salgado, F. M., & Byrne, P. M. (1989). Evaluation of a three-dimensional method of slope stability analysis. Canadian Geotechnical Journal, 26(4), 679–686.  
 O. Hungr (1987). An extension of Bishop's simplified method of slope stability analysis to three dimensions. Géotechnique, 37(1), 113-117.
 
