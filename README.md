@@ -19,8 +19,8 @@ This project requires the following Python packages (with versions tested):
  - The slip direction and c or φ can be calculated by 3D back analysis using the simplified Janbu method.
  - 2D back calculation is possible for the slip direction calculated in 3D.
  - Forward calculation in 2D is possible for the slip direction, c and φ calculated in 3D.
- - Saves c, φ, FS and slip direction as histogram, csv and shapefile.
-   Note: Histogram output for c is not currently supported. It will be added in the future if needed.
+ - Saves c, φ, FS and slip direction as histogram, csv and shapefile.  
+Note: Histogram output for c is not currently supported. It will be added in the future if needed.
 
 ## References
 Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Japanese Soc. of Civ. Engrs., 394, 21–26 (in Japanese).  
