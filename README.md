@@ -1,4 +1,4 @@
-# Slope Stability: Simplified Janbu Method  
+# Slope Stability: 3D Simplified Janbu Method  
 
  - This is a Python port of the following MATLAB code.  
 ([Landslide-Forensics](https://github.com/benalesh/Landslide-Forensics))  
@@ -20,6 +20,11 @@ This project requires the following Python packages (with versions tested):
  - 2D back calculation is possible for the slip direction calculated in 3D.
  - Forward calculation in 2D is possible for the slip direction, c and φ calculated in 3D.
  - Saves c, φ, FS and slip direction as histogram, csv and shapefile.
+
+## References
+Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Proc., Japanese Soc. of Civ. Engrs., Tokyo, 394/III-9, 21–26 (in Japanese).
+Hungr, O., Salgado, F. M., & Byrne, P. M. (1989). Evaluation of a three-dimensional method of slope stability analysis. Canadian Geotechnical Journal, 26(4), 679–686.
+O. Hungr (1987). An extension of Bishop's simplified method of slope stability analysis to three dimensions. Géotechnique, 37(1), 113-117.
 
 ## Acknowledgments
 Special thanks to Michael Bunn, Ben Leshchinsky, and Michael J. Olsen, whose work (Bunn et al., 2020) laid the foundation for this code. Their original research and MATLAB code were  invaluable in the development of this Python port.
