@@ -19,7 +19,8 @@ This project requires the following Python packages (with versions tested):
  - The sliding direction and c or φ can be calculated by 3D back analysis using the simplified Janbu method.
  - 2D back calculation is possible for the sliding direction calculated in 3D.
  - Forward calculation in 2D is possible for the sliding direction, c and φ calculated in 3D.
- - Saves c, φ, FS and sliding direction as histogram, csv and shapefile.  
+ - Saves c, φ, FS and sliding direction as histogram, csv and shapefile.
+
 Note:  
  - This code does not include the correction factor f0. Please add it if necessary.
  - Histogram output for c is not currently supported.
