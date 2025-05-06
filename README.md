@@ -20,7 +20,9 @@ This project requires the following Python packages (with versions tested):
  - 2D back calculation is possible for the sliding direction calculated in 3D.
  - Forward calculation in 2D is possible for the sliding direction, c and φ calculated in 3D.
  - Saves c, φ, FS and sliding direction as histogram, csv and shapefile.  
-Note: Histogram output for c is not currently supported. It will be added in the future if needed.
+Note:  
+ - This code does not include the correction factor f0. Please add it if necessary.
+ - Histogram output for c is not currently supported.
 
 ## References
 Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Japanese Soc. of Civ. Engrs., 394, 21–26 (in Japanese).  
