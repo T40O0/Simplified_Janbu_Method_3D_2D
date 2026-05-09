@@ -170,13 +170,18 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
         # Apply aspect shift to aspect (0 for attempt 1)
         asp_current = asp0 + asp_shift
         # Project slope vectors into longitudinal (failure
-        # direction) and transverse directions - simple dot product
+        # direction) and transverse directions.
+        # Apparent dip formula: tan(alpha_app) = tan(Slope) * cos(d_aspect)
+        # (Bug fix: previously used the linear approximation Slope*cos(...),
+        # which under-estimates apparent dip on steep slopes.)
         dlon = Aspect - asp_current # Difference between each pixel's aspect
                                     # and the longitudinal direction
         dtra = (Aspect + 90) - asp_current # Difference between each pixel's
                                            # aspect and the transverse direction
-        dy_vals = Slope * np.cos(np.deg2rad(dlon)) # longitudinal pixel slopes
-        dx_vals = Slope * np.cos(np.deg2rad(dtra)) # transverse pixel slopes
+        Slope_rad = np.deg2rad(Slope)
+        tan_slope = np.tan(Slope_rad)
+        dy_vals = np.rad2deg(np.arctan(tan_slope * np.cos(np.deg2rad(dlon)))) # longitudinal pixel slopes
+        dx_vals = np.rad2deg(np.arctan(tan_slope * np.cos(np.deg2rad(dtra)))) # transverse pixel slopes
         # Compute basic geometric properties of each column
         # Compute area of column's true base
         Atb = (csize * csize) * np.sqrt(
@@ -237,11 +242,20 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             """
             # UGAI(1988)######################################################
             # https://doi.org/10.2208/jscej.1988.394_21
+            # Ugai & Hosobori (1988), Eq. (18) — simplified Janbu 3D:
+            #   F = Σ[{(c - u tanφ) Δx Δy + ΔW tanφ} / (cos α_xz · m_α)]
+            #       / Σ (tan α_xz + Kh) · ΔW
+            # Bug fix: the original Python port dropped the seismic term
+            # `Kh · ΔW` (= ky*W in this code) entirely from the longitudinal
+            # driving force, so any pseudo-static coefficient was silently
+            # ignored.  The external load `Ey` (a Bunn-2020 extension carried
+            # over from the original MATLAB) was also missing.  Both are now
+            # included; with the default `ky = Ey = 0` results are unchanged.
             At = (csize * csize)
             term1 = c3d * At - u * At * np.tan(np.deg2rad(phi3d)) + W * np.tan(np.deg2rad(phi3d))
             term1 = term1 / np.cos(np.deg2rad(dy_vals))/md
-            term3 = W * np.tan(np.deg2rad(dy_vals))
-            
+            term3 = W * np.tan(np.deg2rad(dy_vals)) + ky * W + Ey
+
             FRy = np.sum(term1[mask_red])
             FDy = np.sum(term3[mask_red])
             FSY = np.sum(term1[mask_red]) / (np.sum(term3[mask_red]) + 1e-10)
@@ -265,9 +279,12 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             FSx2 = np.sum(term1x[mask_red]) / (np.sum(term2x[mask_red]) + np.sum(term3x[mask_red]) + 1e-10)
             
             # Run equation again to obtain driving forces at correct FS
+            # Bug fix: previously the recomputation of Nx still divided by
+            # FSx1 (=100), which defeated the purpose of this second pass.
+            # Use the updated FSx2 consistently.
             mdx = gz * (1 + (np.sin(np.deg2rad(dx_vals)) * np.tan(np.deg2rad(phi3d))) / (FSx2 * gz))
-            Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx1 +
-                  u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx1) / mdx
+            Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx2 +
+                  u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx2) / mdx
             term1x = c3d * Atb * gz + (Nx - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dx_vals))
             term2x = N * gz * np.tan(np.deg2rad(dx_vals))
             term3x = kx * W + Ex
@@ -277,6 +294,17 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             
             # If the stability conditions are satisfied, mark the inner loop as successful
             if (FRy >= FDy) and (FRy >= 0) and (FDy >= 0) and (FSY < 1.1) and (FSY >1.00) :
+                inner_loop_success = True
+                break
+
+            # Bug fix: handle FS overshoot.
+            # If FSY crosses 1.0 between two consecutive iterations
+            # (i.e. FSY_hist[-2] < 1.0 <= FSY_hist[-1]) we have bracketed
+            # the back-analysis target and can interpolate even when the
+            # stricter (FSY > 1.00 and < 1.1) window was skipped.
+            if (len(FSY_hist) >= 2
+                    and FSY_hist[-2] < 1.0 <= FSY_hist[-1]
+                    and (FRy >= 0) and (FDy >= 0)):
                 inner_loop_success = True
                 break
 
@@ -394,7 +422,17 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     # --------------------------------------------------------------
     # 2. Slice width
     # --------------------------------------------------------------
-    AtbH = csize /np.cos(np.deg2rad(rot3d))
+    # Bug fix: the previous formula `csize / cos(rot3d)` blew up at
+    # rot3d = ±90° / ±270° and produced **negative** AtbH whenever
+    # cos(rot3d) < 0 (i.e. rot3d in (90°, 270°) mod 360°), which is a
+    # large fraction of real cases.  The correct horizontal slice width
+    # for grid-aligned cells stepped along the slip direction is
+    #     b_i = csize / max(|cos(rot3d)|, |sin(rot3d)|)
+    # because the cells in the strip step by csize in whichever grid
+    # axis is closer to the slip direction.
+    ang_rad = np.deg2rad(rot3d)
+    _denom = max(abs(np.cos(ang_rad)), abs(np.sin(ang_rad)))
+    AtbH = csize / max(_denom, 1e-6)
     
     # --------------------------------------------------------------
     # 3. Select cells for 2D analysis
@@ -1009,11 +1047,19 @@ def main():
             # Connect cells with polyline
             indices = np.argwhere(longest_mask)
             pts = [(sub_X[i,j], sub_Y[i,j]) for (i,j) in indices]
-            # θ = azimuth abgle of north reference CW
-            # (sinθ,cosθ) is the unit vector in that direction
-            theta_rad = np.deg2rad(-rot3d+90)
-            ux = np.sin(theta_rad)
-            uy = np.cos(theta_rad)
+            # θ = azimuth angle from north, clockwise positive.
+            # Coordinates are (X = East, Y = North), so the unit vector
+            # along the slip direction θ is (sinθ, cosθ):
+            #   θ=0   (N) → (0, 1)
+            #   θ=90  (E) → (1, 0)
+            #   θ=180 (S) → (0, -1)
+            #   θ=270 (W) → (-1, 0)
+            # Bug fix: previously the code converted θ to a math-angle
+            # (90 - θ) and then took (sin, cos) again, which effectively
+            # swapped ux/uy and rotated the projection axis by 90°.
+            theta_rad = np.deg2rad(rot3d)
+            ux = np.sin(theta_rad)   # East component
+            uy = np.cos(theta_rad)   # North component
             
             feature['cell_count'] = len(pts)
             
