@@ -17,6 +17,7 @@ This project requires the following Python packages (with versions tested):
 
 ## Features
  - The sliding direction and c or φ can be calculated by 3D back analysis using the simplified Janbu method.
+ - Pseudo-static seismic coefficients (kx, ky) and applied horizontal loads (Ex, Ey) can be applied to the 3D back analysis.
  - 2D back calculation is possible for the sliding direction calculated in 3D.
  - Forward calculation in 2D is possible for the sliding direction, c and φ calculated in 3D.
  - Saves c, φ, FS and sliding direction as histogram, csv and shapefile.
@@ -24,6 +25,7 @@ This project requires the following Python packages (with versions tested):
 Note:  
  - This code does not include the correction factor f0. Please add it if necessary.
  - Histogram output for c is not currently supported.
+ - 2D back/forward analysis is valid for any slip azimuth (rot3d), including east–west and south-facing orientations.
 
 ## References
 Ugai, K., and Hosobori, K. (1988). Extension of simplified Bishop method, simplified Janbu method and Spencer method to three-dimensions. Japanese Soc. of Civ. Engrs., 394, 21–26 (in Japanese).  
