@@ -67,47 +67,42 @@ def gradient_king(Elevation, csize):
     """
     Elevation : 2D ndarray (elevation data)
     csize     : cell size [m]
-    
-    dy negative: south  positive: north  values are rise/run
-    dx negative: west   positive: east   values are rise/run
+
     Aspect : array of aspect (direction) angles for each cell[deg]
              starts north and rotates clockwise
     Slope  : array of slope angles for each cell[deg]
+
+    Vectorised implementation of the original ArcGIS-style 3x3 Sobel
+    gradient.  Produces identical values to the previous double for-loop
+    on the inner region and leaves the outer ring as 0 (matching the
+    MATLAB reference, which also skips j=1, j=m, k=1, k=n).
     """
     m, n = Elevation.shape
     Slope = np.zeros((m, n))
     Aspect = np.zeros((m, n))
-    dx = np.zeros((m, n))
-    dy = np.zeros((m, n))
-    
-    for j in range(1, m-1):
-        for k in range(1, n-1):
-            #Perform gradient calculations like in ArcGIS
-            dz_dx = (((Elevation[j-1, k+1]) + 2 * (Elevation[j, k+1]) + (Elevation[j+1, k+1]) -
-                      (Elevation[j-1, k-1]) - 2 * (Elevation[j, k-1]) - (Elevation[j+1, k-1]))
-                     / (8 * csize))
-            dz_dy = (((Elevation[j+1, k-1]) + 2 * (Elevation[j+1, k]) + (Elevation[j+1, k+1]) -
-                      (Elevation[j-1, k-1]) - 2 * (Elevation[j-1, k]) - (Elevation[j-1, k+1]))
-                     / (8 * csize))
-            # Compute Slope
-            rise_run = np.sqrt(dz_dx**2 + dz_dy**2)
-            Slope[j, k] = np.degrees(np.arctan(rise_run))
-            
-            # Aspect calculation with corrections matching the MATLAB version
-            aspect = np.degrees(np.arctan2(dz_dy, -dz_dx))
-            if aspect < 0:
-                cell_val = 90 - aspect
-            elif aspect > 90:
-                cell_val = 360 - aspect + 90
-            else:
-                cell_val = 90 - aspect
-            Aspect[j, k] = cell_val
-            
-            # Package dx and dy
-            dy[j, k] = dz_dy
-            dx[j, k] = -dz_dx
+    if m < 3 or n < 3:
+        return Slope, Aspect
 
-    return Slope, Aspect, dx, dy
+    E = Elevation
+    # ArcGIS Sobel-style gradient on the inner (m-2, n-2) region
+    dz_dx = ((E[:-2, 2:] + 2.0 * E[1:-1, 2:] + E[2:, 2:])
+             - (E[:-2, :-2] + 2.0 * E[1:-1, :-2] + E[2:, :-2])) / (8.0 * csize)
+    dz_dy = ((E[2:, :-2] + 2.0 * E[2:, 1:-1] + E[2:, 2:])
+             - (E[:-2, :-2] + 2.0 * E[:-2, 1:-1] + E[:-2, 2:])) / (8.0 * csize)
+
+    # Slope
+    rise_run = np.sqrt(dz_dx**2 + dz_dy**2)
+    Slope[1:-1, 1:-1] = np.degrees(np.arctan(rise_run))
+
+    # Aspect (vectorised version of the original piecewise mapping)
+    aspect_math = np.degrees(np.arctan2(dz_dy, -dz_dx))
+    cell_val = np.where(
+        aspect_math < 0, 90.0 - aspect_math,
+        np.where(aspect_math > 90, 360.0 - aspect_math + 90.0, 90.0 - aspect_math)
+    )
+    Aspect[1:-1, 1:-1] = cell_val
+
+    return Slope, Aspect
 
 # ====================================================
 # SimpJanbu3D (back analysis)
@@ -153,14 +148,15 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
     # Only once both positive and negative sums have been achieved does
     # switchA*switchB = 0, and the looping stops.
 
-    iter2 = 0 # FILL IN
-    ias = 1 # FILL IN
+    iter2 = 0       # number of *successful* outer iterations (matches MATLAB)
+    fail_attempts = 0 # number of consecutive inner-loop failures before any success
+    ias = 1         # +1: shift positive, -1: shift negative
     asp0 = asp # Record initial aspect so that asp may be manipulated
 
     ROT_3d = []
     FDx_list_3d = []
     MAX_OUTER_ITER = 359
-    
+
     while switchA * switchB == 0:
         # Check the upper limit of the outer loop.
         if abs(asp_shift) >= MAX_OUTER_ITER:
@@ -207,16 +203,20 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
         maxPhi = 90    # max friction angle [deg]
         inner_loop_success = False  # inner loop flag
         
-        while (FRy < FDy) or (FRy < 0 ) or (FDy <0):
+        # Inner loop: increase phi (or c) until FS crosses 1.0 from below.
+        # Bug fix (#12): the previous code carried a (1.00, 1.10) "acceptance
+        # window" plus a redundant bracketing fallback.  With phi_inc = 1° the
+        # window was easy to overshoot, so the fallback ran most of the time.
+        # Replace both with a single, clean bracketing rule that matches the
+        # MATLAB reference (`while FRy < FDy`).
+        while True:
             if st == 1:
                 phi3d += phi_inc
                 if phi3d >= maxPhi:
-                    # print(f" [Warning] φ has reached its upper limit ({maxPhi}°). Stop inner iteration.")
-                    break  # Stop iteration
+                    break  # Stop iteration when phi hits its upper bound
             else:
                 c3d += c_inc
                 if c3d >= maxC:
-                    # print(f" [Warning] c has reached its upper limit ({maxC} kN/m^2). Stop inner iteration.")
                     break
             iter_count += 1
 
@@ -269,15 +269,23 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
 
             # Identify correct factor of safety
             # Transverse (x) safety factor evaluation
+            #
+            # Bug fix (carried over from the original MATLAB): the transverse
+            # driving term was previously computed with the *longitudinal*
+            # column normal `N` (`term2x = N * gz * tan(dx_vals)`), which is
+            # the form copied from `SimpJanbu3D.m`.  The Hungr / Bunn 3D
+            # formulation requires the transverse normal `Nx` here so that
+            # FDx represents the genuine sum of transverse forces; otherwise
+            # the rot3d search converges on a biased zero-crossing.
             FSx1 = 100
             mdx = gz * (1 + (np.sin(np.deg2rad(dx_vals)) * np.tan(np.deg2rad(phi3d))) / (FSx1 * gz))
             Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx1 +
                   u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx1) / mdx
             term1x = c3d * Atb * gz + (Nx - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dx_vals))
-            term2x = N * gz * np.tan(np.deg2rad(dx_vals))
+            term2x = Nx * gz * np.tan(np.deg2rad(dx_vals))
             term3x = kx * W + Ex
             FSx2 = np.sum(term1x[mask_red]) / (np.sum(term2x[mask_red]) + np.sum(term3x[mask_red]) + 1e-10)
-            
+
             # Run equation again to obtain driving forces at correct FS
             # Bug fix: previously the recomputation of Nx still divided by
             # FSx1 (=100), which defeated the purpose of this second pass.
@@ -286,47 +294,35 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx2 +
                   u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx2) / mdx
             term1x = c3d * Atb * gz + (Nx - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dx_vals))
-            term2x = N * gz * np.tan(np.deg2rad(dx_vals))
+            term2x = Nx * gz * np.tan(np.deg2rad(dx_vals))
             term3x = kx * W + Ex
-            #FSx2 = np.sum(term1x[mask_red]) / (np.sum(term2x[mask_red]) + np.sum(term3x[mask_red]) + 1e-10
-            #FRx = np.sum(term1x[mask_red])
             FDx = np.sum(term2x[mask_red]) + np.sum(term3x[mask_red])
-            
-            # If the stability conditions are satisfied, mark the inner loop as successful
-            if (FRy >= FDy) and (FRy >= 0) and (FDy >= 0) and (FSY < 1.1) and (FSY >1.00) :
+
+            # Stop as soon as FS reaches/crosses 1.0 with non-negative forces.
+            # The interpolation step below pins down the exact phi (or c) at
+            # FS = 1 using the last two history entries.
+            if (FRy >= FDy) and (FRy >= 0) and (FDy >= 0):
                 inner_loop_success = True
                 break
 
-            # Bug fix: handle FS overshoot.
-            # If FSY crosses 1.0 between two consecutive iterations
-            # (i.e. FSY_hist[-2] < 1.0 <= FSY_hist[-1]) we have bracketed
-            # the back-analysis target and can interpolate even when the
-            # stricter (FSY > 1.00 and < 1.1) window was skipped.
-            if (len(FSY_hist) >= 2
-                    and FSY_hist[-2] < 1.0 <= FSY_hist[-1]
-                    and (FRy >= 0) and (FDy >= 0)):
-                inner_loop_success = True
-                break
-
-        # If the inner loop fails to converge, skip this direction and try the next one
+        # If the inner loop failed to bracket FS = 1 in this direction, fall
+        # back to a recovery scan: try +1, then -1, and afterwards walk in the
+        # currently chosen direction.  This is a Python-only safety net (the
+        # MATLAB reference simply assumes inner convergence) and only runs
+        # before any successful outer iteration.
         if not inner_loop_success:
             if iter2 == 0:
-                # first try: + direction
-                asp_shift += asp_inc
-                iter2 += 1
-                continue
-            elif iter2 == 1:
-                # second try: – direction
-                asp_shift = -asp_inc
-                iter2 += 1
-                ias = -1  # reverse the shift direction
-                continue
+                if fail_attempts == 0:
+                    asp_shift += asp_inc
+                elif fail_attempts == 1:
+                    asp_shift = -asp_inc
+                    ias = -1
+                else:
+                    asp_shift += ias * asp_inc
+                fail_attempts += 1
             else:
-                #print("iter2: False")
-                #print(iter2,"FRy: ",FRy, "FDy: ", FDy,"FSY: ", FSY, " FDx: ", FDx, " A: ", switchA, " B: ", switchB, "asp_current: ", asp_current) 
                 asp_shift += ias * asp_inc
-                iter2 += 1
-                continue
+            continue
 
         if iter_count > 1:
             if st == 1:
@@ -342,27 +338,30 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             else:
                 c3d_final = c3d - c_inc
                 phi3d_final = phi3d
-                
+
         FDx_list_3d.append(FDx)
         ROT_3d.append(asp_shift)
         iter2 += 1
-        
-        if (len(ROT_3d) >= 2) and (np.abs(ROT_3d[-2]-ROT_3d[-1])!=1):
-            if FDx > 0:
-                switchA = 1
-                switchB = 0
-            else:
-                switchA = 0
-                switchB = 1
+
+        # Update transverse-force switches.  Each successful iteration is
+        # responsible for setting *one* of A or B based on the sign of FDx;
+        # once both have been set (i.e. we have bracketed FDx = 0) the outer
+        # loop terminates.
+        if FDx > 0:
+            switchA = 1
         else:
-            if FDx > 0:
-                switchA = 1
-            else:
-                switchB = 1
-            
-        #print(iter2,"FRy: ",FRy, "FDy: ", FDy,"FSY: ", FSY, " FDx: ", FDx, " A: ", switchA, " B: ", switchB, "asp_current: ", asp_current) 
+            switchB = 1
+
+        # MATLAB heuristic (#11): after the second successful iteration,
+        # reverse the shift direction if |FDx| is *growing* (i.e. we are
+        # walking away from the zero-crossing).  Mirrors
+        # `if iter2 == 2 and abs(FDX(1)) < abs(FDX(2)): ias = -1` in
+        # SimpJanbu3D.m.
+        if iter2 == 2 and abs(FDx_list_3d[0]) < abs(FDx_list_3d[1]):
+            ias = -1
+
         asp_shift += ias * asp_inc
-        
+
         if switchA * switchB != 0:
             break
 
@@ -391,7 +390,7 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
                           c0, phi0, W0, u, gs, strength, kx, ky, Ex, Ey,  mode="inverse"):
     """
     Simplified Janbu method (slice analysis) applied to 2D cross‐sections.
-    
+
     Parameters:
       longest_mask: Boolean mask of valid cells
       csize:        Cell size[m]
@@ -401,14 +400,18 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
       rot3d:        Slip azimuth angle [deg]
       c0:           Initial cohesion [kN/m2]
       phi0:         Initial internal friction angle [deg]
-      W0:           volume weight per cell
-      u:            Effective pore pressure per cell (or equivalent)
-      gs, kx, ky,
-      Ex, Ey:       Other parameters (not used here; no seismic support)
+      W0:           Per-cell volume [m^3] (i.e. csize*csize*(G-S)).
+                    Internally multiplied by ``gs`` to obtain weight.
+      u:            Pore pressure [kN/m^2]
+      gs:           Unit weight of soil [kN/m^3] used to convert W0 to weight
+      kx, ky:       Pseudo-static seismic coefficients (transverse / longitudinal).
+                    Only ``ky`` participates in the 2D longitudinal balance.
+      Ex, Ey:       Applied horizontal loads (transverse / longitudinal).
+                    Only ``Ey`` participates in the 2D longitudinal balance.
       strength:     'phi' to adjust friction angle, 'c' to adjust cohesion
       mode:         "inverse" (default) or "fs" for forward FS calculation
     """
-    
+
     # --------------------------------------------------------------
     # 1. Calculate the effective tilt angle of each cell
     # --------------------------------------------------------------
@@ -418,7 +421,14 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     # dtheta: azimuth difference between the slope aspect and the slip section [rad]
     Slope_rad = np.deg2rad(Slope)
     dy_vals = np.rad2deg(np.arctan(np.tan(Slope_rad) * np.cos(dtheta)))
-    
+
+    # Bug fix (#1): the function previously treated the per-cell volume W0 as
+    # if it were already a weight, leaving the gs argument unused.  That made
+    # the cohesion / pore-pressure terms numerically incommensurate with the
+    # gravity-driven terms (off by ~gs ≈ 20×) and biased phi2d / c2d / FS2D.
+    # Convert volume to weight here so the rest of the function works in kN.
+    W = W0 * gs
+
     # --------------------------------------------------------------
     # 2. Slice width
     # --------------------------------------------------------------
@@ -433,20 +443,20 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     ang_rad = np.deg2rad(rot3d)
     _denom = max(abs(np.cos(ang_rad)), abs(np.sin(ang_rad)))
     AtbH = csize / max(_denom, 1e-6)
-    
+
     # --------------------------------------------------------------
     # 3. Select cells for 2D analysis
     # --------------------------------------------------------------
-    # Warnings are generated under the following conditions
-    # ・When longest_mask is all False (no cross section candidates can be extracted)
-    # ・When there are many missing values (NaN) in W0 and no valid cells remain.
-    # ・When there are too many missing values (NaN) in dy_vals and no valid cells remain.
-    # ・When all W0 values are less than or equal to 0
-    # ・when all dy_vals values are less than or equal to 0
-
-    valid_cells = longest_mask & ~np.isnan(W0) & ~np.isnan(dy_vals) & (W0 > 0) & (dy_vals > 0)
+    # Bug fix (#7): the previous filter `(W0 > 0) & (dy_vals > 0)` discarded
+    # every horizontal- or counter-sloped cell, biasing the analysis at the
+    # toe / crown of the slip.  We now keep all cells with positive volume
+    # and finite tilt; the slice may legitimately include a few cells whose
+    # local apparent dip is ≤ 0 (those simply contribute negative drive).
+    valid_cells = (longest_mask
+                   & ~np.isnan(W) & ~np.isnan(dy_vals)
+                   & (W > 0))
     if np.sum(valid_cells) == 0:
-        print(" [Warning] No valid cells available") 
+        print(" [Warning] No valid cells available")
         return phi0, c0
 
     # --------------------------------------------------------------
@@ -454,19 +464,22 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     # --------------------------------------------------------------
     def calc_fs(phi_val, c_val):
         # Calculate the Factor of Safety FS using the internal
-        # friction angle phi_val [deg] and c_val[kN/m2] 
-        fs_est = 1.0  
+        # friction angle phi_val [deg] and c_val[kN/m2]
+        fs_est = 1.0
         for _ in range(30):
-            sinA = np.sin(np.deg2rad(dy_vals))
             cosA = np.cos(np.deg2rad(dy_vals))
             tanA = np.tan(np.deg2rad(dy_vals))
             tan_phi = np.tan(np.deg2rad(phi_val))
-            
-            denom = cosA * cosA * (1.0 + (tan_phi * tanA)/ fs_est)
+
+            denom = cosA * cosA * (1.0 + (tan_phi * tanA) / fs_est)
             denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
-            resist_term = c_val * AtbH + (W0 - u * AtbH) * tan_phi
-            resist_term = resist_term / denom
-            drive_term = W0 * tanA
+            resist_term = (c_val * AtbH + (W - u * AtbH) * tan_phi) / denom
+            # Bug fix (#8): seismic / external-load terms were silently
+            # ignored even though `kx, ky, Ex, Ey` were accepted as arguments.
+            # Add the longitudinal contributions `ky*W + Ey` to drive — these
+            # mirror the 3D `term3` in SimpJanbu3D.  `kx` and `Ex` are
+            # transverse and have no role in this 2D longitudinal balance.
+            drive_term = W * tanA + ky * W + Ey
             sum_drive = np.sum(drive_term[valid_cells])
             if sum_drive < 1e-10:
                 return float('inf')
@@ -613,15 +626,19 @@ def extract_longest_contiguous_slice(mask, X, Y, rot3d, csize):
     out = np.zeros_like(mask, dtype=bool)
     for ij in best_seq:
         out[tuple(ij)] = True
-        
-        
-    import matplotlib.pyplot as plt   
-    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    ax[0].imshow(mask, cmap='gray')
-    ax[0].set_title('Original Mask')
-    ax[1].imshow(out, cmap='gray')
-    ax[1].set_title('Extracted Longest Slice')
-    plt.show()
+
+    # Bug fix (#4): the previous version called `plt.show()` here, which
+    # blocks the loop in `main` once per slide and is hostile to batch /
+    # CI runs.  Visualisation is kept as a disabled debug snippet — flip
+    # the constant below to True for one-off debugging.
+    DEBUG_PLOT = False
+    if DEBUG_PLOT:
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].imshow(mask, cmap='gray')
+        ax[0].set_title('Original Mask')
+        ax[1].imshow(out, cmap='gray')
+        ax[1].set_title('Extracted Longest Slice')
+        plt.show()
     return out
 
 def extract_deepest_contiguous_slice(mask, X, Y, rot3d, csize, G, S, Aspect=None):
@@ -675,8 +692,13 @@ def extract_deepest_contiguous_slice(mask, X, Y, rot3d, csize, G, S, Aspect=None
                 cur = [i+1]
         seqs.append(cur)
         # The average depth is calculated for each bin and each successive column, and the maximum is recorded.
+        # Bug fix (#13): skip sequences whose depth values are all NaN so that
+        # `np.nanmean` does not emit a "Mean of empty slice" RuntimeWarning.
         for seq in seqs:
-            mean_d = np.nanmean(dval[seq])
+            seq_vals = dval[seq]
+            if seq_vals.size == 0 or np.all(np.isnan(seq_vals)):
+                continue
+            mean_d = np.nanmean(seq_vals)
             if mean_d > best_mean_depth:
                 best_seq = idxs[seq]
                 best_mean_depth = mean_d
@@ -762,13 +784,19 @@ def main():
 
     # Read input data
     inPath = 'input'
-    outPath="output"
+    outPath = "output"
+    # Bug fix (#3): make sure the output directory exists before any
+    # `to_file` / `to_csv` call.  geopandas raises an opaque error if the
+    # parent directory is missing, which used to surface only at the very
+    # end of a long batch run.
+    os.makedirs(outPath, exist_ok=True)
+
     # Read landslide extents (use attributes.shp for aspect)
     dep_shp = os.path.join(inPath, 'landslide_poly.shp') # <------ input
     F_gdf = gpd.read_file(dep_shp)
     F = F_gdf.to_dict('records')
     print(f" [Info] Shapefile '{dep_shp}' has been read. (1/5)")
-    
+
     # Name output extents
     ba_shp = os.path.join(outPath, 'back_analysis.shp') # <------ input
     
@@ -793,7 +821,10 @@ def main():
     print(f" [Info] TIF file '{top_surf}' has been read. (4/5)")
     
     # Calculate slip surface slope, aspect（gradient_king function）
-    SLOPE, ASPECT, DX_arr, DY_arr = gradient_king(Slip, csize)
+    # Bug fix (#15): gradient_king no longer returns the unused dz/dx, dz/dy
+    # arrays.  Both the original MATLAB and this Python port computed them
+    # but never consumed them downstream.
+    SLOPE, ASPECT = gradient_king(Slip, csize)
     shape_img = Slip.shape  # (rows, cols)
     X, Y = worldGrid(transform, shape_img)
     print(f" [Info] Slip surface slope calculation and grid creation completed. (5/5)")
@@ -1089,6 +1120,24 @@ def main():
             feature['c2d']    = 0.0
             feature['phi2d']  = 0.0
             continue
+
+    # Bug fix (#14): every skip path used to set its own subset of keys —
+    # e.g. one path forgot `FS2Dby3D`, another forgot `c2d`/`phi2d`.  The
+    # resulting dict-list produced a GeoDataFrame whose columns were riddled
+    # with NaNs in unrelated rows, and shapefile writers complained.
+    # Normalise the schema once here so every feature carries every key.
+    _expected_defaults = {
+        'c3d': 0.0, 'phi3d': 0.0, 'rot3d': 0.0,
+        'c2d': 0.0, 'phi2d': 0.0,
+        'FS2Dby3D': 0.0,
+        'cell_count': 0,
+        'g_d': 0.0, 'g_s': 0.0, 'g_w': 0.0, 'g_i': 0.0,
+        'Ru': 0.0, 'Rgh': 0.0,
+        'skip_reason': "",
+    }
+    for feature in F:
+        for key, default in _expected_defaults.items():
+            feature.setdefault(key, default)
 
     # Save shapefile (back-analysis results)
     F_gdf_out = gpd.GeoDataFrame(F, crs=F_gdf.crs)
