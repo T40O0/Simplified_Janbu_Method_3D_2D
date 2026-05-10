@@ -1,6 +1,12 @@
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Claude Code workspace metadata
+.claude/
 
 .gitignore
 .gitattributes
