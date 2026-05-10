@@ -808,7 +808,7 @@ def main():
         csize = src.res[0]  # Assume square cells
     print(f" [Info] TIF file '{slip_surf}' has been read. (2/5)")
 
-    # Read ground surfaces（Progressive）
+    # Read ground surfaces (Progressive)
     dem_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
     with rasterio.open(dem_surf) as src:
         DEM = src.read(1)
@@ -820,7 +820,7 @@ def main():
         TOP = src.read(1)
     print(f" [Info] TIF file '{top_surf}' has been read. (4/5)")
     
-    # Calculate slip surface slope, aspect（gradient_king function）
+    # Calculate slip surface slope, aspect (gradient_king function)
     # Bug fix (#15): gradient_king no longer returns the unused dz/dx, dz/dy
     # arrays.  Both the original MATLAB and this Python port computed them
     # but never consumed them downstream.
