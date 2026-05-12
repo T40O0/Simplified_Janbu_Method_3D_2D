@@ -533,6 +533,7 @@ if out_dir and Path(out_dir).exists():
     phi2d_png = out_dir / "phi2d_hist.png"
     phi3d_csv = out_dir / "phi3d_hist.csv"
     phi2d_csv = out_dir / "phi2d_hist.csv"
+    shear_mat = out_dir / "shear_strength.mat"
     ba_shp = out_dir / "back_analysis.shp"
     poly_shp = out_dir / "2D_stability_polyline.shp"
     log_path = out_dir / "_run.log"
@@ -594,6 +595,12 @@ if out_dir and Path(out_dir).exists():
             _dl(phi3d_csv, "phi3d_hist.csv", "text/csv")
         with ccsv[2]:
             _dl(phi2d_csv, "phi2d_hist.csv", "text/csv")
+
+        st.subheader("Shear-strength PMF (.mat)")
+        st.caption(
+            "Probability mass over (phi, c) pairs, in the schema consumed by "
+            "USGS RegionGrow3D (prob, prob_phi [deg], prob_coh [kPa]).")
+        _dl(shear_mat, "shear_strength.mat", "application/octet-stream")
 
         st.subheader("Shapefile bundles")
         st.caption("Shapefiles need their sidecar files (.shx, .dbf, .prj, "
