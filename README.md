@@ -23,9 +23,8 @@ data is **not** committed to the repository; place your own copies under
 
 ```
 input/
-├── DEM10.tif                 # ground-surface DEM (Progressive fail type)
+├── DEM10.tif                 # single DEM (post-failure or pre-failure - see fail_type)
 ├── slide.tif                 # slip-surface raster
-├── (TOP.tif)                 # optional - only used when fail_type='Catastrophic'
 └── SHP/
     ├── landslide_poly.shp    # landslide polygons (with .dbf / .shx / .prj / .cpg)
     ├── landslide_poly.shx
@@ -36,11 +35,24 @@ input/
 
 File names are free-form: the GUI lets you pick any `.shp` / `.tif` under
 `input/`, and the CLI accepts arbitrary paths via `--poly`, `--slip`,
-`--dem`, `--top`. The shapefile DBF columns are preserved in the
+`--dem`. The shapefile DBF columns are preserved in the
 `output/back_analysis.shp` so you can carry your own attributes through.
 
 The rasters must share a CRS and grid with the polygons; cell size is read
 from the slip raster's `transform`.
+
+### About `fail_type`
+The `--fail-type` flag (`Progressive` | `Catastrophic`) is a **metadata
+label** that records what the supplied DEM represents:
+
+| `fail_type` | DEM meaning | When to choose |
+|---|---|---|
+| `Progressive` (default) | Post-failure / current ground surface | Back-analysing the geometry of the current deposit, or a slope that has been slowly creeping. |
+| `Catastrophic` | Pre-failure top surface | Back-analysing the original mass that failed at a single moment (e.g. a co-seismic slide). Provide a pre-failure DEM. |
+
+The math is identical either way (`G - S` column thickness with `G` = the
+supplied DEM). The label is stamped on every output feature
+(`back_analysis.shp` / `results.csv`) for record-keeping.
 
 ## Usage
 
