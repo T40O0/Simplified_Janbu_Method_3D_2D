@@ -146,8 +146,8 @@ Note:
 
 ## Performance
 
-Measured wall-clock time on the bundled-style sample (sample polygon set,
-2801 × 2251 raster), Numba JIT cache hot:
+Measured wall-clock time on a bundled-style sample (≈ 2801 × 2251 raster
+with several hundred landslide polygons), Numba JIT cache hot:
 
 | Polygons | Time | Notes |
 |---|---|---|
