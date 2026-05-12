@@ -238,12 +238,6 @@ skip_2d = st.sidebar.checkbox(
          "FS2D_by_phi3d_c3d are left at 0 and the 2D polyline shapefile / "
          "phi2d histogram are not produced. Useful when only the 3D "
          "back-analysis is needed.")
-n_jobs = st.sidebar.number_input(
-    "Worker threads (--jobs)", -1, 32, 1, 1, key="n_jobs", disabled=DIS,
-    help="Polygon-level parallelism. 1 = serial (recommended). "
-         "-1 = use all cores. Threading is the default backend. "
-         "On this dataset class threading typically gives ~10% benefit "
-         "and loky (processes) is slower than serial due to startup.")
 
 with st.sidebar.expander("Unit weights / pore pressure", expanded=False):
     cw1, cw2, cw3 = st.columns(3)
@@ -415,8 +409,9 @@ def _build_cmd():
                 "--pga-scaling", str(pga_scaling)]
     if skip_2d:
         cmd += ["--no-2d"]
-    if int(n_jobs) != 1:
-        cmd += ["--jobs", str(int(n_jobs))]
+    # --jobs is intentionally not exposed in the GUI (this dataset class
+    # is slower with workers > 1 due to per-polygon overhead).  CLI users
+    # can still pass --jobs N --backend threading|loky directly.
     return cmd
 
 
