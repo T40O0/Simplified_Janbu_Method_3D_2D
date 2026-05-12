@@ -8,5 +8,12 @@ __pycache__/
 # Claude Code workspace metadata
 .claude/
 
+# Local input data and run outputs (do not publish)
+input/
+output/
+
+# Reference material (PDFs, .url shortcuts, etc.)
+reference/
+
 .gitignore
 .gitattributes

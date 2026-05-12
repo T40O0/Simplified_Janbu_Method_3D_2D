@@ -765,26 +765,68 @@ def extract_deepest_contiguous_slice(mask, X, Y, rot3d, csize, G, S, Aspect=None
 # main process
 # ====================================================
 
-def main():
+def main(
+    poly_shp=None,
+    slip_tif=None,
+    dem_tif=None,
+    top_tif=None,
+    out_path=None,
+    phi_thresh=1.0,
+    c_thresh=1.0,
+    gw=9.8,
+    gd=16.0,
+    gs=20.0,
+    ru=0.25,
+    kx=0.0,
+    ky=0.0,
+    Ex=0.0,
+    Ey=0.0,
+    strength='phi',
+    fail_type='Progressive',
+):
+    """Run the full Janbu back-analysis pipeline.
+
+    All arguments have defaults equivalent to the original hard-coded values,
+    so calling ``main()`` with no arguments reproduces the legacy behaviour
+    (reads ``input/landslide_poly.shp``, ``input/slide.tif``,
+    ``input/DEM10.tif`` and writes everything under ``output/``).
+
+    Parameters
+    ----------
+    poly_shp, slip_tif, dem_tif : str | Path, optional
+        Input file paths.  ``top_tif`` defaults to ``dem_tif`` when omitted,
+        matching the legacy "TOP also uses the same file" behaviour.
+    out_path : str | Path, optional
+        Output directory; auto-created if missing.
+    phi_thresh, c_thresh : float
+        Initial guesses for friction angle [deg] and cohesion [kN/m²] fed
+        into the back-analysis inner loop.
+    gw, gd, gs : float
+        Unit weights of water, dry soil, and saturated soil [kN/m³].
+    ru : float
+        Pore-pressure ratio (u = γ_w · depth · Ru).
+    kx, ky : float
+        Pseudo-static seismic coefficients (transverse / longitudinal).
+    Ex, Ey : float
+        Applied horizontal loads (transverse / longitudinal).
+    strength : {'phi', 'c'}
+        Which parameter to back-solve when targeting FS = 1.
+    fail_type : {'Progressive', 'Catastrophic'}
+        ``Progressive`` uses the DEM raster as ground surface; ``Catastrophic``
+        uses the TOP raster.
+    """
     start = time.time()
-    
-    # Specify model inputs
-    phi_thresh = 1
-    c_thresh = 1
-    gw = 9.8      # [kN/m^3]
-    gd = 16.0     # [kN/m^3]
-    gs = 20.0     # [kN/m^3]
-    gi = (gd + gs) / 2
-    ru = 0.25
 
-    ky = 0.00
-    kx = 0
-    Ey = 0
-    Ex = 0
-
-    # Read input data
+    # Resolve defaults
     inPath = 'input'
-    outPath = "output"
+    poly_shp = poly_shp if poly_shp is not None else os.path.join(inPath, 'landslide_poly.shp')
+    slip_tif = slip_tif if slip_tif is not None else os.path.join(inPath, 'slide.tif')
+    dem_tif = dem_tif if dem_tif is not None else os.path.join(inPath, 'DEM10.tif')
+    top_tif = top_tif if top_tif is not None else dem_tif
+    outPath = str(out_path) if out_path is not None else 'output'
+
+    gi = (gd + gs) / 2
+
     # Bug fix (#3): make sure the output directory exists before any
     # `to_file` / `to_csv` call.  geopandas raises an opaque error if the
     # parent directory is missing, which used to surface only at the very
@@ -792,16 +834,16 @@ def main():
     os.makedirs(outPath, exist_ok=True)
 
     # Read landslide extents (use attributes.shp for aspect)
-    dep_shp = os.path.join(inPath, 'landslide_poly.shp') # <------ input
+    dep_shp = str(poly_shp)
     F_gdf = gpd.read_file(dep_shp)
     F = F_gdf.to_dict('records')
     print(f" [Info] Shapefile '{dep_shp}' has been read. (1/5)")
 
     # Name output extents
-    ba_shp = os.path.join(outPath, 'back_analysis.shp') # <------ input
-    
+    ba_shp = os.path.join(outPath, 'back_analysis.shp')
+
     # Read slip surface DEM
-    slip_surf = os.path.join(inPath, 'slide.tif') # <------ input
+    slip_surf = str(slip_tif)
     with rasterio.open(slip_surf) as src:
         Slip = src.read(1)
         transform = src.transform
@@ -809,13 +851,13 @@ def main():
     print(f" [Info] TIF file '{slip_surf}' has been read. (2/5)")
 
     # Read ground surfaces (Progressive)
-    dem_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
+    dem_surf = str(dem_tif)
     with rasterio.open(dem_surf) as src:
         DEM = src.read(1)
     print(f" [Info] TIF file '{dem_surf}' has been read. (3/5)")
-    
-    # TOP also uses the same file (modified as needed)
-    top_surf = os.path.join(inPath, 'DEM10.tif') # <------ input
+
+    # TOP raster used by the 'Catastrophic' branch (defaults to DEM)
+    top_surf = str(top_tif)
     with rasterio.open(top_surf) as src:
         TOP = src.read(1)
     print(f" [Info] TIF file '{top_surf}' has been read. (4/5)")
@@ -903,7 +945,6 @@ def main():
             
             # Extract sub-regions
             S = Slip[XYminr:XYmaxr+1, XYminc:XYmaxc+1]  # Slip surface
-            fail_type = 'Progressive'
             if fail_type == 'Progressive':
                 G = DEM[XYminr:XYmaxr+1, XYminc:XYmaxc+1] # Ground surface DEM
             else:
@@ -1006,7 +1047,7 @@ def main():
             try:
                 rot3d, phi3d, c3d = SimpJanbu3D(mask_red, csize, Slope_local, Aspect_local,
                                                  asp, c_thresh, phi_thresh, W0, u_i_val, gi,
-                                                 'phi', kx, ky, Ex, Ey)
+                                                 strength, kx, ky, Ex, Ey)
             except Exception as e:
                 print(f"Slide {idx+1}: SimpJanbu3D error (skipped): {e}")
                 feature['skip_reason'] = f"SimpJanbu3D error: {e}"
@@ -1048,7 +1089,7 @@ def main():
             try:
                 phi2d, c2d = SimpleJanbu2D_slice(longest_mask, csize, Slope_local, Aspect_local,
                                                   rot3d, c_thresh, phi_thresh, W0, u_i_val, gi,
-                                                  'phi', kx, ky, Ex, Ey, "inverse")
+                                                  strength, kx, ky, Ex, Ey, "inverse")
             except Exception as e:
                 print(f"Slide {idx+1}: SimpleJanbu2D_slice_inverse error: {e}")
                 feature['skip_reason'] = f"SimpleJanbu2D_slice_inverse error: {e}"
@@ -1064,7 +1105,7 @@ def main():
             try:
                 FS2Dby3D = SimpleJanbu2D_slice(longest_mask, csize, Slope_local, Aspect_local,
                                            rot3d, c3d, phi3d, W0, u_i_val, gi,
-                                           'phi', kx, ky, Ex, Ey, "fs")
+                                           strength, kx, ky, Ex, Ey, "fs")
             except Exception as e:
                 print(f"Slide {idx+1}: SimpleJanbu2D_slice_fs error(skipped): {e}")
                 feature['skip_reason'] = f"SimpleJanbu2D_slice_fs error: {e}"
@@ -1255,5 +1296,49 @@ def main():
     end = time.time()
     print("Elapsed time:", end - start)
 
+def _build_cli():
+    """argparse front-end for ``main`` (also used by the Streamlit GUI)."""
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Simplified Janbu method - 3D/2D back & forward analysis.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument('--poly', dest='poly_shp', default=None,
+                   help="Landslide polygon shapefile.")
+    p.add_argument('--slip', dest='slip_tif', default=None,
+                   help="Slip-surface raster (.tif).")
+    p.add_argument('--dem', dest='dem_tif', default=None,
+                   help="Ground-surface DEM raster (.tif).")
+    p.add_argument('--top', dest='top_tif', default=None,
+                   help="TOP surface raster (used when fail-type=Catastrophic). "
+                        "Defaults to --dem.")
+    p.add_argument('--out', dest='out_path', default=None,
+                   help="Output directory.")
+    p.add_argument('--phi-init', dest='phi_thresh', type=float, default=1.0,
+                   help="Initial guess for phi [deg].")
+    p.add_argument('--c-init', dest='c_thresh', type=float, default=1.0,
+                   help="Initial guess for cohesion [kN/m^2].")
+    p.add_argument('--gw', type=float, default=9.8,
+                   help="Unit weight of water [kN/m^3].")
+    p.add_argument('--gd', type=float, default=16.0,
+                   help="Unit weight of dry soil [kN/m^3].")
+    p.add_argument('--gs', type=float, default=20.0,
+                   help="Unit weight of saturated soil [kN/m^3].")
+    p.add_argument('--ru', type=float, default=0.25,
+                   help="Pore-pressure ratio.")
+    p.add_argument('--kx', type=float, default=0.0)
+    p.add_argument('--ky', type=float, default=0.0)
+    p.add_argument('--Ex', type=float, default=0.0)
+    p.add_argument('--Ey', type=float, default=0.0)
+    p.add_argument('--strength', choices=('phi', 'c'), default='phi',
+                   help="Which strength parameter to back-solve.")
+    p.add_argument('--fail-type', dest='fail_type',
+                   choices=('Progressive', 'Catastrophic'), default='Progressive',
+                   help="Use DEM (Progressive) or TOP (Catastrophic) for ground "
+                        "surface.")
+    return p
+
+
 if __name__ == "__main__":
-    main()
+    args = _build_cli().parse_args()
+    main(**vars(args))

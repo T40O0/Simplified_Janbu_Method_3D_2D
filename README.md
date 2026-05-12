@@ -14,6 +14,65 @@ This project requires the following Python packages (with versions tested):
  - rasterio   1.4.3
  - scipy      1.15.2
  - shapely    2.1.0
+ - streamlit  ≥ 1.30 (only required for the GUI)
+
+## Input data layout
+The CLI / GUI scan `input/` recursively for shapefiles and rasters. Sample
+data is **not** committed to the repository; place your own copies under
+`input/` (the folder is git-ignored). Example layout:
+
+```
+input/
+├── DEM10.tif                 # ground-surface DEM (Progressive fail type)
+├── slide.tif                 # slip-surface raster
+├── (TOP.tif)                 # optional - only used when fail_type='Catastrophic'
+└── SHP/
+    ├── landslide_poly.shp    # landslide polygons (with .dbf / .shx / .prj / .cpg)
+    ├── landslide_poly.shx
+    ├── landslide_poly.dbf
+    ├── landslide_poly.prj
+    └── landslide_poly.cpg
+```
+
+File names are free-form: the GUI lets you pick any `.shp` / `.tif` under
+`input/`, and the CLI accepts arbitrary paths via `--poly`, `--slip`,
+`--dem`, `--top`. The shapefile DBF columns are preserved in the
+`output/back_analysis.shp` so you can carry your own attributes through.
+
+The rasters must share a CRS and grid with the polygons; cell size is read
+from the slip raster's `transform`.
+
+## Usage
+
+### CLI (single run, reproducible)
+
+```bash
+python BackAnalysis_3D.py \
+    --poly input/SHP/landslide_poly.shp \
+    --slip input/slide.tif \
+    --dem  input/DEM10.tif \
+    --out  output \
+    --strength phi --fail-type Progressive
+```
+
+Run `python BackAnalysis_3D.py --help` for the full parameter list (initial
+phi / c, unit weights, Ru, seismic coefficients kx / ky, external loads
+Ex / Ey, etc.). Defaults match the legacy behaviour, so the original
+`python BackAnalysis_3D.py` invocation still works if your files are named
+`input/landslide_poly.shp`, `input/slide.tif`, `input/DEM10.tif`.
+
+### Streamlit GUI
+
+```bash
+streamlit run gui.py
+```
+
+The browser UI walks `input/` for file pickers, exposes every solver
+parameter, and shells out to `BackAnalysis_3D.py`'s CLI as a detached
+subprocess. The run keeps going if you close the browser; reopening
+`gui.py` reattaches via the manifest at `output/.gui_manifest.json`.
+Results, histograms, and downloadable CSVs appear in tabs when the run
+finishes.
 
 ## Features
  - The sliding direction and c or φ can be calculated by 3D back analysis using the simplified Janbu method.
