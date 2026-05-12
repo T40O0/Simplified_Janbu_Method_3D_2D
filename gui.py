@@ -231,6 +231,19 @@ phi_init = c1.number_input("Initial phi [deg]", 0.0, 89.0, 1.0, 1.0,
                             key="phi_init", disabled=DIS)
 c_init = c2.number_input("Initial c [kN/m^2]", 0.0, 200.0, 1.0, 1.0,
                           key="c_init", disabled=DIS)
+skip_2d = st.sidebar.checkbox(
+    "Skip 2D back/forward analysis (only run 3D)", value=False,
+    key="skip_2d", disabled=DIS,
+    help="When ticked, no 2D cross-section is extracted; phi2d / c2d / "
+         "FS2D_by_phi3d_c3d are left at 0 and the 2D polyline shapefile / "
+         "phi2d histogram are not produced. Useful when only the 3D "
+         "back-analysis is needed.")
+n_jobs = st.sidebar.number_input(
+    "Worker threads (--jobs)", -1, 32, 1, 1, key="n_jobs", disabled=DIS,
+    help="Polygon-level parallelism. 1 = serial (recommended). "
+         "-1 = use all cores. Threading is the default backend. "
+         "On this dataset class threading typically gives ~10% benefit "
+         "and loky (processes) is slower than serial due to startup.")
 
 with st.sidebar.expander("Unit weights / pore pressure", expanded=False):
     cw1, cw2, cw3 = st.columns(3)
@@ -240,18 +253,71 @@ with st.sidebar.expander("Unit weights / pore pressure", expanded=False):
                            key="gd", disabled=DIS)
     gs = cw3.number_input("gs [kN/m^3]", 15.0, 24.0, 20.0, 0.5,
                            key="gs", disabled=DIS)
-    ru = st.slider("Ru (pore-pressure ratio)", 0.0, 1.0, 0.25, 0.05,
-                    key="ru", disabled=DIS,
-                    help="u = gw * (G - S) * Ru")
+
+    water_mode_label = st.radio(
+        "Pore-pressure model",
+        ["Ru (fraction of slip-mass thickness)",
+         "Uniform groundwater depth (GL - m)"],
+        index=0, disabled=DIS, key="water_mode_radio",
+        help="Ru: u = gw * (G - S) * Ru. GL: u = gw * max(0, (G - S) - depth).")
+    if water_mode_label.startswith("Ru"):
+        water_mode = "Ru"
+        ru = st.slider("Ru", 0.0, 1.0, 0.25, 0.05,
+                        key="ru", disabled=DIS,
+                        help="Water column height above slip / slip-mass thickness.")
+        water_depth_GL = 0.0
+    else:
+        water_mode = "GL"
+        water_depth_GL = st.number_input(
+            "Water table depth below ground (GL - m)", 0.0, 100.0, 2.0, 0.5,
+            key="water_depth_GL", disabled=DIS,
+            help="0 = saturated up to ground surface. Cells whose slip mass "
+                 "is shallower than this depth contribute u = 0.")
+        ru = 0.25  # ignored in GL mode
 
 with st.sidebar.expander("Seismic / external loads", expanded=False):
-    sk1, sk2 = st.columns(2)
-    kx = sk1.number_input("kx (transverse)", -0.5, 0.5, 0.0, 0.05,
-                           key="kx", disabled=DIS)
-    ky = sk2.number_input("ky (longitudinal)", -0.5, 0.5, 0.0, 0.05,
-                           key="ky", disabled=DIS,
-                           help="Pseudo-static seismic coefficient along slip "
-                                "direction. Also used by the 2D analysis.")
+    pga_mode = st.radio(
+        "Seismic source",
+        ["off", "uniform (scalar kx, ky)", "raster (PGA tif)"],
+        index=0, disabled=DIS, key="pga_mode_radio")
+    pga_raster_path = ""
+    pga_scaling = 1.0
+    if pga_mode == "uniform (scalar kx, ky)":
+        sk1, sk2 = st.columns(2)
+        kx = sk1.number_input("kx (transverse)", -0.5, 0.5, 0.0, 0.05,
+                               key="kx", disabled=DIS)
+        ky = sk2.number_input("ky (longitudinal)", -0.5, 0.5, 0.0, 0.05,
+                               key="ky", disabled=DIS,
+                               help="Pseudo-static seismic coefficient along "
+                                    "slip direction. Also used by the 2D "
+                                    "analysis.")
+    elif pga_mode == "raster (PGA tif)":
+        pga_files = _scan("*.tif") if "_scan" in dir() else []  # may be undefined
+        # _scan is defined later in the file; build pickers similarly here.
+        pga_options = ["(choose...)"] + [
+            str(p.relative_to(INPUT_DIR)) for p in INPUT_DIR.rglob("*.tif")
+        ] + ["[Enter custom path]"]
+        sel = st.selectbox("PGA raster (.tif)", pga_options, index=0,
+                            disabled=DIS, key="pga_sel",
+                            help="Co-registered with the slip raster ideally. "
+                                 "Mismatched grids are nearest-neighbour "
+                                 "resampled internally.")
+        if sel == "[Enter custom path]":
+            pga_raster_path = st.text_input("PGA raster absolute path", "",
+                                              key="pga_custom", disabled=DIS)
+        elif sel != "(choose...)":
+            pga_raster_path = str(INPUT_DIR / sel)
+        pga_scaling = st.slider("PGA scaling factor", 0.0, 2.0, 1.0, 0.05,
+                                  key="pga_scaling", disabled=DIS)
+        kx = st.number_input("kx (transverse, scalar)", -0.5, 0.5, 0.0, 0.05,
+                              key="kx_with_pga", disabled=DIS,
+                              help="Per-cell ky comes from the PGA raster; "
+                                   "kx remains scalar.")
+        ky = 0.0  # overridden per-cell by the raster
+    else:
+        kx = 0.0
+        ky = 0.0
+
     sE1, sE2 = st.columns(2)
     Ex = sE1.number_input("Ex (transverse) [kN]", -1e6, 1e6, 0.0, 1.0,
                            key="Ex", disabled=DIS, format="%.1f")
@@ -329,19 +395,29 @@ if "output_dir" not in st.session_state:
 
 
 def _build_cmd():
-    return [PYTHON_EXE, "-u", str(DRIVER),
-            "--poly", str(poly_path),
-            "--slip", str(slip_path),
-            "--dem", str(dem_path),
-            "--out", str(out_path_preview),
-            "--phi-init", str(phi_init),
-            "--c-init", str(c_init),
-            "--gw", str(gw), "--gd", str(gd), "--gs", str(gs),
-            "--ru", str(ru),
-            "--kx", str(kx), "--ky", str(ky),
-            "--Ex", str(Ex), "--Ey", str(Ey),
-            "--strength", strength,
-            "--fail-type", fail_type]
+    cmd = [PYTHON_EXE, "-u", str(DRIVER),
+           "--poly", str(poly_path),
+           "--slip", str(slip_path),
+           "--dem", str(dem_path),
+           "--out", str(out_path_preview),
+           "--phi-init", str(phi_init),
+           "--c-init", str(c_init),
+           "--gw", str(gw), "--gd", str(gd), "--gs", str(gs),
+           "--water-mode", water_mode,
+           "--ru", str(ru),
+           "--water-depth", str(water_depth_GL),
+           "--kx", str(kx), "--ky", str(ky),
+           "--Ex", str(Ex), "--Ey", str(Ey),
+           "--strength", strength,
+           "--fail-type", fail_type]
+    if pga_raster_path:
+        cmd += ["--pga-raster", pga_raster_path,
+                "--pga-scaling", str(pga_scaling)]
+    if skip_2d:
+        cmd += ["--no-2d"]
+    if int(n_jobs) != 1:
+        cmd += ["--jobs", str(int(n_jobs))]
+    return cmd
 
 
 # ---- Start: spawn detached subprocess -------------------------------------

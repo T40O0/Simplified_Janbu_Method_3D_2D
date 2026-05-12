@@ -73,6 +73,22 @@ Ex / Ey, etc.). Defaults match the legacy behaviour, so the original
 `python BackAnalysis_3D.py` invocation still works if your files are named
 `input/landslide_poly.shp`, `input/slide.tif`, `input/DEM10.tif`.
 
+#### Pore-pressure model: Ru or uniform GL depth
+Two parameterisations are available via `--water-mode`:
+
+| mode | formula | when to use |
+|---|---|---|
+| `Ru` (default) | `u = gw * (G - S) * Ru` | Want a single ratio of water-column-height to slip-mass-thickness. |
+| `GL`           | `u = gw * max(0, (G - S) - depth)` | Want a uniform groundwater table depth (in metres below ground), e.g. `--water-mode GL --water-depth 2.0`. |
+
+#### Seismic input: scalar or PGA raster
+By default `--ky` / `--kx` are scalars applied uniformly. Supplying a
+co-registered PGA raster instead overrides the per-cell longitudinal
+coefficient: `--pga-raster path/to/PGA.tif --pga-scaling 1.0`. Each cell's
+effective `ky` becomes `PGA_cell * pga_scaling`; `kx` remains scalar. If
+the PGA raster is on a different grid, it is nearest-neighbour resampled
+onto the slip-surface grid internally.
+
 ### Streamlit GUI
 
 ```bash
