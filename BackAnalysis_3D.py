@@ -205,6 +205,51 @@ def create_shp_mask(geom, transform, shape):
     full[row_lo:row_hi, col_lo:col_hi] = sub_mask
     return full
 
+def _save_shear_strength_mat(out_path, bin_edges, phi_filt,
+                              strength, phi_const, c_const):
+    """Write a (phi3d) back-analysis histogram as a downstream
+    consumable .mat file.
+
+    Schema (matches the third-party app spec):
+        prob       (1-D, length N): probability mass per (phi, c) pair, sum ~= 1
+        prob_phi   (1-D, length N): friction angle [deg] for that pair
+        prob_coh   (1-D, length N): cohesion [kPa] for that pair
+
+    Currently the back-analysis sweeps only the strength parameter
+    selected via ``strength``; the other one is held at its initial
+    value.  We therefore emit a marginal distribution:
+        strength='phi' -> prob_phi varies, prob_coh = c_const (constant)
+        strength='c'   -> prob_phi = phi_const (constant), prob_coh varies
+    """
+    from scipy.io import savemat
+    bin_edges = np.asarray(bin_edges, dtype=np.float64)
+    centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    if phi_filt.size == 0:
+        prob = np.zeros(centers.size, dtype=np.float64)
+    else:
+        counts_raw, _ = np.histogram(phi_filt, bins=bin_edges)
+        total = float(counts_raw.sum())
+        if total > 0:
+            prob = counts_raw.astype(np.float64) / total
+        else:
+            prob = np.zeros(centers.size, dtype=np.float64)
+
+    if str(strength).lower() == 'c':
+        prob_phi = np.full(centers.size, float(phi_const), dtype=np.float64)
+        prob_coh = centers.astype(np.float64)
+    else:
+        prob_phi = centers.astype(np.float64)
+        prob_coh = np.full(centers.size, float(c_const), dtype=np.float64)
+
+    savemat(out_path, {
+        'prob':     prob,
+        'prob_phi': prob_phi,
+        'prob_coh': prob_coh,
+    })
+    print(f" [Info] Saved shear-strength distribution to '{out_path}' "
+          f"(N={centers.size}, sum(prob)={prob.sum():.4f}).")
+
+
 def safe_float(val):
     """
     Convert an input safely to float for factor of safety (FS) calculations.
@@ -1428,24 +1473,15 @@ def main(
         'includes_upper': includes_upper
     })
     hist_df.to_csv(histogram_csv_path, index=False)
-    
-    """
-    # for RegionGrow3D
-    # DOI: 10.5066/P1BSMGGD
-    from scipy.io import savemat
-    center_phi = np.array(center_phi)      # shape (N,)
-    prob = np.array(counts)                # shape (N,)
-    prob_coh = np.repeat(c_thresh, center_phi.size)
-    # prob_coh = np.repeat(c_thresh, center_phi.size)[None, :]
-    mdic = {
-        'prob':     prob,
-        'prob_phi': center_phi,
-        'prob_coh': prob_coh
-    }
-    matfile = os.path.join(out_path, 'phi3d_hist.mat')
-    savemat(matfile, mdic)
-    print(f"Saved MATLAB .mat file to {matfile}")
-    """
+
+    # shear_strength.mat (3D back-analysis) for downstream consumers.
+    # Format: prob (PMF, sum=1), prob_phi [deg], prob_coh [kPa], all 1-D
+    # arrays of length N (= number of histogram bins).
+    _save_shear_strength_mat(
+        out_path=os.path.join(outPath, 'shear_strength.mat'),
+        bin_edges=bin_edges, phi_filt=phi3d_filt,
+        strength=strength, phi_const=phi_thresh, c_const=c_thresh,
+    )
     
     if not skip_2d:
         # Create phi2d histogram and output to CSV
