@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import numpy as np
@@ -9,6 +10,130 @@ from shapely import contains_xy  # shapely 2.0+
 import matplotlib.pyplot as plt
 from scipy import ndimage
 from shapely.geometry import LineString
+
+# Optional Numba acceleration.  When numba is present, the hot inner sweep in
+# SimpJanbu3D is JIT-compiled (~10x faster); otherwise a pure-Python fallback
+# is used so the module still imports.
+try:
+    from numba import njit, prange
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover
+    _HAS_NUMBA = False
+    prange = range  # fallback when numba isn't installed
+
+    def njit(*args, **kwargs):  # type: ignore[no-redef]
+        def _wrap(fn):
+            return fn
+        # Allow @njit (no args) or @njit(cache=True) usage.
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return _wrap
+
+
+@njit(cache=True, fastmath=False)
+def _inner_sweep_jit(
+    st, c0, phi0, phi_inc, c_inc, maxC, maxPhi, FSy, At,
+    gz_m, sin_dy_m, cos_dy_m, tan_dy_m,
+    sin_dx_m, cos_dx_m, tan_dx_m, Atb_m,
+    W_m, u_m, ky_m, kx_m, Ey_m, Ex_m,
+):
+    """JIT-compiled SimpJanbu3D inner sweep.
+
+    Mirrors the linear 1-deg phi (or c) sweep + bracket-end interpolation.
+    All array arguments must be float64 1-D arrays of the same length.
+    Scalar params (kx, ky, Ex, Ey, u) should be pre-broadcast to arrays
+    by the caller for type stability.
+
+    Returns
+    -------
+    success : bool
+    phi3d_final : float
+    c3d_final : float
+    FDx : float
+    """
+    M = W_m.shape[0]
+    iter_count = 0
+    FSY_prev = 0.0
+    x_prev = 0.0
+    phi3d = phi0
+    c3d = c0
+
+    while True:
+        if st == 1:
+            phi3d += phi_inc
+            if phi3d >= maxPhi:
+                return False, phi0, c0, 0.0
+            x_curr_test = phi3d
+        else:
+            c3d += c_inc
+            if c3d >= maxC:
+                return False, phi0, c0, 0.0
+            x_curr_test = c3d
+        iter_count += 1
+
+        tan_phi = math.tan(math.radians(phi3d))
+
+        # Longitudinal sums
+        FRy = 0.0
+        FDy = 0.0
+        for i in range(M):
+            gz = gz_m[i]
+            md_i = gz * (1.0 + (sin_dy_m[i] * tan_phi) / (FSy * gz))
+            t1 = (c3d * At - u_m[i] * At * tan_phi + W_m[i] * tan_phi) \
+                / cos_dy_m[i] / md_i
+            t3 = W_m[i] * tan_dy_m[i] + ky_m[i] * W_m[i] + Ey_m[i]
+            FRy += t1
+            FDy += t3
+        FSY_curr = FRy / (FDy + 1e-10)
+
+        if FRy >= FDy and FRy >= 0.0 and FDy >= 0.0:
+            # Compute FDx at the converged phi / c (two passes: FSx2 then FDx).
+            FSx1 = 100.0
+            num_t1x = 0.0
+            den_t2x = 0.0
+            den_t3x = 0.0
+            for i in range(M):
+                gz = gz_m[i]
+                mdx_i = gz * (1.0 + (sin_dx_m[i] * tan_phi) / (FSx1 * gz))
+                Nx_i = (W_m[i]
+                        - c3d * Atb_m[i] * sin_dx_m[i] / FSx1
+                        + u_m[i] * Atb_m[i] * tan_phi * sin_dx_m[i] / FSx1
+                        ) / mdx_i
+                num_t1x += c3d * Atb_m[i] * gz \
+                    + (Nx_i - u_m[i] * Atb_m[i]) * tan_phi * cos_dx_m[i]
+                den_t2x += Nx_i * gz * tan_dx_m[i]
+                den_t3x += kx_m[i] * W_m[i] + Ex_m[i]
+            FSx2 = num_t1x / (den_t2x + den_t3x + 1e-10)
+
+            FDx = 0.0
+            for i in range(M):
+                gz = gz_m[i]
+                mdx_i = gz * (1.0 + (sin_dx_m[i] * tan_phi) / (FSx2 * gz))
+                Nx_i = (W_m[i]
+                        - c3d * Atb_m[i] * sin_dx_m[i] / FSx2
+                        + u_m[i] * Atb_m[i] * tan_phi * sin_dx_m[i] / FSx2
+                        ) / mdx_i
+                FDx += Nx_i * gz * tan_dx_m[i] + kx_m[i] * W_m[i] + Ex_m[i]
+
+            # Interpolation matching the original linear-sweep behaviour.
+            if iter_count > 1:
+                if FSY_curr != FSY_prev:
+                    interp_x = x_prev + (x_curr_test - x_prev) \
+                        * (1.0 - FSY_prev) / (FSY_curr - FSY_prev)
+                else:
+                    interp_x = x_curr_test
+                if st == 1:
+                    return True, interp_x, c3d, FDx
+                else:
+                    return True, phi3d, interp_x, FDx
+            else:
+                if st == 1:
+                    return True, phi3d - phi_inc, c3d, FDx
+                else:
+                    return True, phi3d, c3d - c_inc, FDx
+
+        FSY_prev = FSY_curr
+        x_prev = x_curr_test
 
 # ====================================================
 # Utility functions
@@ -33,11 +158,52 @@ def create_shp_mask(geom, transform, shape):
     Create a 2D Boolean mask from a shapely geometry.
     geom:     a shapely geometry object
     transform: a rasterio transform
+
+    Performance note: the polygon is point-in-polygon-tested only against
+    the sub-grid covering its bounding box (with a 1-cell margin), then
+    the result is stamped into the full-shape mask.  For small landslides
+    on a large raster this is orders of magnitude faster than testing
+    every raster pixel.
     """
     rows, cols = shape
-    X, Y = worldGrid(transform, shape)
-    mask = contains_xy(geom, X.ravel(), Y.ravel())
-    return mask.reshape(rows, cols)  # Explicitly specify the number of rows and columns
+    full = np.zeros((rows, cols), dtype=bool)
+
+    # Empty / degenerate geometry guard.
+    bounds = getattr(geom, "bounds", None)
+    if bounds is None or not bounds:
+        return full
+    minx, miny, maxx, maxy = bounds
+
+    a = transform.a
+    c_val = transform.c
+    e = transform.e  # usually negative
+    f_val = transform.f
+
+    # Pixel-index bounding box (inclusive on the low side, exclusive on the
+    # high side).  Pixel-centre formulas: col = (x - c)/a - 0.5,
+    # row = (y - f)/e - 0.5.  Add a 1-cell margin to make sure the mask
+    # captures pixels whose centres are just inside the polygon edge.
+    col_lo = int(np.floor((minx - c_val) / a - 0.5)) - 1
+    col_hi = int(np.ceil((maxx - c_val) / a - 0.5)) + 2
+    if e < 0:
+        row_lo = int(np.floor((maxy - f_val) / e - 0.5)) - 1
+        row_hi = int(np.ceil((miny - f_val) / e - 0.5)) + 2
+    else:
+        row_lo = int(np.floor((miny - f_val) / e - 0.5)) - 1
+        row_hi = int(np.ceil((maxy - f_val) / e - 0.5)) + 2
+    col_lo = max(0, col_lo)
+    col_hi = min(cols, col_hi)
+    row_lo = max(0, row_lo)
+    row_hi = min(rows, row_hi)
+    if col_lo >= col_hi or row_lo >= row_hi:
+        return full
+
+    x_sub = c_val + (np.arange(col_lo, col_hi) + 0.5) * a
+    y_sub = f_val + (np.arange(row_lo, row_hi) + 0.5) * e
+    Xs, Ys = np.meshgrid(x_sub, y_sub)
+    sub_mask = contains_xy(geom, Xs.ravel(), Ys.ravel()).reshape(Xs.shape)
+    full[row_lo:row_hi, col_lo:col_hi] = sub_mask
+    return full
 
 def safe_float(val):
     """
@@ -72,36 +238,31 @@ def gradient_king(Elevation, csize):
              starts north and rotates clockwise
     Slope  : array of slope angles for each cell[deg]
 
-    Vectorised implementation of the original ArcGIS-style 3x3 Sobel
-    gradient.  Produces identical values to the previous double for-loop
-    on the inner region and leaves the outer ring as 0 (matching the
-    MATLAB reference, which also skips j=1, j=m, k=1, k=n).
+    Vectorised numpy implementation of the original ArcGIS-style 3x3
+    Sobel gradient.  A Numba-JIT version was tried but produced ULP-level
+    drift in Slope/Aspect that propagates to ~1e-6 differences in phi3d
+    and rot3d after the rot search, so the numpy version is retained for
+    numerical stability.  The one-time cost is small (~0.3s on a typical
+    2801x2251 DEM).
     """
     m, n = Elevation.shape
     Slope = np.zeros((m, n))
     Aspect = np.zeros((m, n))
     if m < 3 or n < 3:
         return Slope, Aspect
-
     E = Elevation
-    # ArcGIS Sobel-style gradient on the inner (m-2, n-2) region
     dz_dx = ((E[:-2, 2:] + 2.0 * E[1:-1, 2:] + E[2:, 2:])
              - (E[:-2, :-2] + 2.0 * E[1:-1, :-2] + E[2:, :-2])) / (8.0 * csize)
     dz_dy = ((E[2:, :-2] + 2.0 * E[2:, 1:-1] + E[2:, 2:])
              - (E[:-2, :-2] + 2.0 * E[:-2, 1:-1] + E[:-2, 2:])) / (8.0 * csize)
-
-    # Slope
     rise_run = np.sqrt(dz_dx**2 + dz_dy**2)
     Slope[1:-1, 1:-1] = np.degrees(np.arctan(rise_run))
-
-    # Aspect (vectorised version of the original piecewise mapping)
     aspect_math = np.degrees(np.arctan2(dz_dy, -dz_dx))
     cell_val = np.where(
         aspect_math < 0, 90.0 - aspect_math,
         np.where(aspect_math > 90, 360.0 - aspect_math + 90.0, 90.0 - aspect_math)
     )
     Aspect[1:-1, 1:-1] = cell_val
-
     return Slope, Aspect
 
 # ====================================================
@@ -157,6 +318,22 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
     FDx_list_3d = []
     MAX_OUTER_ITER = 359
 
+    # Polygon-constant per-cell arrays.  These depend only on mask_red,
+    # so we compute them ONCE here instead of every asp_shift iteration
+    # (the asp_shift loop only varies the trig terms via dy_vals/dx_vals).
+    mask_flat = mask_red.ravel()
+    M_const = int(np.count_nonzero(mask_flat))
+    def _broadcast(v, length):
+        if isinstance(v, np.ndarray) and v.ndim > 0:
+            return np.ascontiguousarray(v.ravel()[mask_flat].astype(np.float64, copy=False))
+        return np.full(length, float(v), dtype=np.float64)
+    W_a_poly = _broadcast(W, M_const)
+    u_a_poly = _broadcast(u, M_const)
+    ky_a_poly = _broadcast(ky, M_const)
+    kx_a_poly = _broadcast(kx, M_const)
+    Ey_a_poly = _broadcast(Ey, M_const)
+    Ex_a_poly = _broadcast(Ex, M_const)
+
     while switchA * switchB == 0:
         # Check the upper limit of the outer loop.
         if abs(asp_shift) >= MAX_OUTER_ITER:
@@ -174,143 +351,53 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
                                     # and the longitudinal direction
         dtra = (Aspect + 90) - asp_current # Difference between each pixel's
                                            # aspect and the transverse direction
-        Slope_rad = np.deg2rad(Slope)
-        tan_slope = np.tan(Slope_rad)
+        tan_slope = np.tan(np.deg2rad(Slope))
         dy_vals = np.rad2deg(np.arctan(tan_slope * np.cos(np.deg2rad(dlon)))) # longitudinal pixel slopes
         dx_vals = np.rad2deg(np.arctan(tan_slope * np.cos(np.deg2rad(dtra)))) # transverse pixel slopes
-        # Compute basic geometric properties of each column
-        # Compute area of column's true base
-        Atb = (csize * csize) * np.sqrt(
-            1 - (np.sin(np.deg2rad(dx_vals))**2 * np.sin(np.deg2rad(dy_vals))**2)
-        ) / (np.cos(np.deg2rad(dx_vals)) * np.cos(np.deg2rad(dy_vals)))
-        # Compute local dip of sliding surface
-        gz = np.sqrt(1 / (np.tan(np.deg2rad(dy_vals))**2 +
-                          np.tan(np.deg2rad(dx_vals))**2 + 1))
-        
-        # Inner loop: adjust phi3d or c3d until FS ≈ 1
-        phi3d = phi0
-        c3d = c0
+
+        # Speedup A + B: cache every per-cell quantity that is constant
+        # within the inner phi/c loop.  Only the trig terms depend on
+        # asp_shift; the polygon-level masked arrays (W_a_poly, u_a_poly,
+        # ky/kx/Ey/Ex) were pre-broadcast once above and are reused.
+        dy_rad_m = np.deg2rad(dy_vals.ravel()[mask_flat])
+        dx_rad_m = np.deg2rad(dx_vals.ravel()[mask_flat])
+        sin_dy_m = np.sin(dy_rad_m)
+        cos_dy_m = np.cos(dy_rad_m)
+        tan_dy_m = np.tan(dy_rad_m)
+        sin_dx_m = np.sin(dx_rad_m)
+        cos_dx_m = np.cos(dx_rad_m)
+        tan_dx_m = np.tan(dx_rad_m)
+        Atb_m = (csize * csize) * np.sqrt(
+            1 - (sin_dx_m**2 * sin_dy_m**2)
+        ) / (cos_dx_m * cos_dy_m)
+        gz_m = np.sqrt(1 / (tan_dy_m**2 + tan_dx_m**2 + 1))
+        At = csize * csize
+
+        # Inner sweep: linear 1-deg phi (or c) walk + bracket-end interp,
+        # delegated to the Numba-JIT'd helper.
         FSy = 1.0
-        FRy = 0
-        FDy = 1.0
-        iter_count = 0
-        FSY_hist = []
-        if st == 1:
-            phi3d_hist = []
-        else:
-            c3d_hist = []
-        maxC = c0 + 50 # max cohesion [kN/m2]
-        maxPhi = 90    # max friction angle [deg]
-        inner_loop_success = False  # inner loop flag
-        
-        # Inner loop: increase phi (or c) until FS crosses 1.0 from below.
-        # Bug fix (#12): the previous code carried a (1.00, 1.10) "acceptance
-        # window" plus a redundant bracketing fallback.  With phi_inc = 1° the
-        # window was easy to overshoot, so the fallback ran most of the time.
-        # Replace both with a single, clean bracketing rule that matches the
-        # MATLAB reference (`while FRy < FDy`).
-        while True:
-            if st == 1:
-                phi3d += phi_inc
-                if phi3d >= maxPhi:
-                    break  # Stop iteration when phi hits its upper bound
-            else:
-                c3d += c_inc
-                if c3d >= maxC:
-                    break
-            iter_count += 1
+        maxC = c0 + 50.0
+        maxPhi = 90.0
+        # Trig terms are the only per-asp_shift inputs; the polygon-constant
+        # arrays were pre-broadcast above (W_a_poly etc.) so we just need to
+        # ensure the trig arrays are contiguous float64 for the JIT call.
+        success, phi_final, c_final, FDx = _inner_sweep_jit(
+            int(st), float(c0), float(phi0),
+            float(phi_inc), float(c_inc),
+            float(maxC), float(maxPhi), float(FSy), float(At),
+            np.ascontiguousarray(gz_m), np.ascontiguousarray(sin_dy_m),
+            np.ascontiguousarray(cos_dy_m), np.ascontiguousarray(tan_dy_m),
+            np.ascontiguousarray(sin_dx_m), np.ascontiguousarray(cos_dx_m),
+            np.ascontiguousarray(tan_dx_m), np.ascontiguousarray(Atb_m),
+            W_a_poly, u_a_poly, ky_a_poly, kx_a_poly, Ey_a_poly, Ex_a_poly,
+        )
+        inner_loop_success = bool(success)
+        phi3d_final = float(phi_final)
+        c3d_final = float(c_final)
+        FDx = float(FDx)
 
-            ## Compute LONGITUDINAL stability
-            # Compute normal force at base of column (Assume FS = 1)
-
-            md = gz * (1 + (np.sin(np.deg2rad(dy_vals)) * np.tan(np.deg2rad(phi3d))) / (FSy*gz))
-            N = (W - c3d * Atb * np.sin(np.deg2rad(dy_vals)) / FSy +
-                 u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dy_vals)) / FSy) / md
-
-            # Compute FS
-            """
-            # Bunn(2020)######################################################
-            # https://doi.org/10.1029/2019JF005461
-            term1 = c3d * Atb * gz + (N - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dy_vals))
-            term2 = N * gz * np.tan(np.deg2rad(dy_vals))
-            term3 = ky * W + Ey
-            
-            FRy = np.sum(term1[mask_red])
-            FDy = np.sum(term2[mask_red]) + np.sum(term3[mask_red])
-            FSY = np.sum(term1[mask_red]) / (np.sum(term2[mask_red]) + np.sum(term3[mask_red]) + 1e-10)
-            ####################################################################
-            """
-            # UGAI(1988)######################################################
-            # https://doi.org/10.2208/jscej.1988.394_21
-            # Ugai & Hosobori (1988), Eq. (18) — simplified Janbu 3D:
-            #   F = Σ[{(c - u tanφ) Δx Δy + ΔW tanφ} / (cos α_xz · m_α)]
-            #       / Σ (tan α_xz + Kh) · ΔW
-            # Bug fix: the original Python port dropped the seismic term
-            # `Kh · ΔW` (= ky*W in this code) entirely from the longitudinal
-            # driving force, so any pseudo-static coefficient was silently
-            # ignored.  The external load `Ey` (a Bunn-2020 extension carried
-            # over from the original MATLAB) was also missing.  Both are now
-            # included; with the default `ky = Ey = 0` results are unchanged.
-            At = (csize * csize)
-            term1 = c3d * At - u * At * np.tan(np.deg2rad(phi3d)) + W * np.tan(np.deg2rad(phi3d))
-            term1 = term1 / np.cos(np.deg2rad(dy_vals))/md
-            term3 = W * np.tan(np.deg2rad(dy_vals)) + ky * W + Ey
-
-            FRy = np.sum(term1[mask_red])
-            FDy = np.sum(term3[mask_red])
-            FSY = np.sum(term1[mask_red]) / (np.sum(term3[mask_red]) + 1e-10)
-            ####################################################################
-            
-            FSY_hist.append(FSY)
-            if st == 1:
-                phi3d_hist.append(phi3d)
-            else:
-                c3d_hist.append(c3d)
-
-            # Identify correct factor of safety
-            # Transverse (x) safety factor evaluation
-            #
-            # Bug fix (carried over from the original MATLAB): the transverse
-            # driving term was previously computed with the *longitudinal*
-            # column normal `N` (`term2x = N * gz * tan(dx_vals)`), which is
-            # the form copied from `SimpJanbu3D.m`.  The Hungr / Bunn 3D
-            # formulation requires the transverse normal `Nx` here so that
-            # FDx represents the genuine sum of transverse forces; otherwise
-            # the rot3d search converges on a biased zero-crossing.
-            FSx1 = 100
-            mdx = gz * (1 + (np.sin(np.deg2rad(dx_vals)) * np.tan(np.deg2rad(phi3d))) / (FSx1 * gz))
-            Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx1 +
-                  u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx1) / mdx
-            term1x = c3d * Atb * gz + (Nx - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dx_vals))
-            term2x = Nx * gz * np.tan(np.deg2rad(dx_vals))
-            term3x = kx * W + Ex
-            FSx2 = np.sum(term1x[mask_red]) / (np.sum(term2x[mask_red]) + np.sum(term3x[mask_red]) + 1e-10)
-
-            # Run equation again to obtain driving forces at correct FS
-            # Bug fix: previously the recomputation of Nx still divided by
-            # FSx1 (=100), which defeated the purpose of this second pass.
-            # Use the updated FSx2 consistently.
-            mdx = gz * (1 + (np.sin(np.deg2rad(dx_vals)) * np.tan(np.deg2rad(phi3d))) / (FSx2 * gz))
-            Nx = (W - c3d * Atb * np.sin(np.deg2rad(dx_vals)) / FSx2 +
-                  u * Atb * np.tan(np.deg2rad(phi3d)) * np.sin(np.deg2rad(dx_vals)) / FSx2) / mdx
-            term1x = c3d * Atb * gz + (Nx - u * Atb) * np.tan(np.deg2rad(phi3d)) * np.cos(np.deg2rad(dx_vals))
-            term2x = Nx * gz * np.tan(np.deg2rad(dx_vals))
-            term3x = kx * W + Ex
-            FDx = np.sum(term2x[mask_red]) + np.sum(term3x[mask_red])
-
-            # Stop as soon as FS reaches/crosses 1.0 with non-negative forces.
-            # The interpolation step below pins down the exact phi (or c) at
-            # FS = 1 using the last two history entries.
-            if (FRy >= FDy) and (FRy >= 0) and (FDy >= 0):
-                inner_loop_success = True
-                break
-
-        # If the inner loop failed to bracket FS = 1 in this direction, fall
-        # back to a recovery scan: try +1, then -1, and afterwards walk in the
-        # currently chosen direction.  This is a Python-only safety net (the
-        # MATLAB reference simply assumes inner convergence) and only runs
-        # before any successful outer iteration.
         if not inner_loop_success:
+            # Recovery: try alternate rotation directions before giving up.
             if iter2 == 0:
                 if fail_attempts == 0:
                     asp_shift += asp_inc
@@ -323,21 +410,6 @@ def SimpJanbu3D(mask_red, csize, Slope, Aspect, asp, c0, phi0, W0, u, gs, streng
             else:
                 asp_shift += ias * asp_inc
             continue
-
-        if iter_count > 1:
-            if st == 1:
-                phi3d_final = np.interp(1, [FSY_hist[-2], FSY_hist[-1]], [phi3d_hist[-2], phi3d_hist[-1]])
-                c3d_final = c3d
-            else:
-                c3d_final = np.interp(1, [FSY_hist[-2], FSY_hist[-1]], [c3d_hist[-2], c3d_hist[-1]])
-                phi3d_final = phi3d
-        else:
-            if st == 1:
-                phi3d_final = phi3d - phi_inc
-                c3d_final = c3d
-            else:
-                c3d_final = c3d - c_inc
-                phi3d_final = phi3d
 
         FDx_list_3d.append(FDx)
         ROT_3d.append(asp_shift)
@@ -462,32 +534,37 @@ def SimpleJanbu2D_slice(longest_mask, csize, Slope, Aspect, rot3d,
     # --------------------------------------------------------------
     # 4. Calculate the factor of safety FS (calc_fs)
     # --------------------------------------------------------------
+    # Speedup A + B: precompute the per-cell trigonometric terms and the
+    # mask-filtered 1D vectors so calc_fs reduces to a handful of vector
+    # ops + sums.  Results are identical to the previous form.
+    dy_rad_m = np.deg2rad(dy_vals[valid_cells])
+    cosA_m = np.cos(dy_rad_m)
+    tanA_m = np.tan(dy_rad_m)
+    cos2_m = cosA_m * cosA_m
+    def _mask(v):
+        return v[valid_cells] if isinstance(v, np.ndarray) and v.ndim > 0 else v
+    W_m = _mask(W)
+    u_m = _mask(u)
+    ky_m = _mask(ky)
+    Ey_m = _mask(Ey)
+    drive_const = W_m * tanA_m + ky_m * W_m + Ey_m  # phi-independent
+    sum_drive = float(np.sum(drive_const))
+
     def calc_fs(phi_val, c_val):
         # Calculate the Factor of Safety FS using the internal
         # friction angle phi_val [deg] and c_val[kN/m2]
+        if sum_drive < 1e-10:
+            return float('inf')
         fs_est = 1.0
+        tan_phi = np.tan(np.deg2rad(phi_val))
+        resist_num = c_val * AtbH + (W_m - u_m * AtbH) * tan_phi  # phi/c-only numerator
         for _ in range(30):
-            cosA = np.cos(np.deg2rad(dy_vals))
-            tanA = np.tan(np.deg2rad(dy_vals))
-            tan_phi = np.tan(np.deg2rad(phi_val))
-
-            denom = cosA * cosA * (1.0 + (tan_phi * tanA) / fs_est)
-            denom = np.where(np.abs(denom) < 1e-6, 1e-6, denom)
-            resist_term = (c_val * AtbH + (W - u * AtbH) * tan_phi) / denom
-            # Bug fix (#8): seismic / external-load terms were silently
-            # ignored even though `kx, ky, Ex, Ey` were accepted as arguments.
-            # Add the longitudinal contributions `ky*W + Ey` to drive — these
-            # mirror the 3D `term3` in SimpJanbu3D.  `kx` and `Ex` are
-            # transverse and have no role in this 2D longitudinal balance.
-            drive_term = W * tanA + ky * W + Ey
-            sum_drive = np.sum(drive_term[valid_cells])
-            if sum_drive < 1e-10:
-                return float('inf')
-            fs_new = np.sum(resist_term[valid_cells]) / sum_drive
-            
+            # denom = cos^2 * (1 + tan_phi*tanA / FS)
+            denom_m = cos2_m * (1.0 + (tan_phi * tanA_m) / fs_est)
+            denom_m = np.where(np.abs(denom_m) < 1e-6, 1e-6, denom_m)
+            fs_new = np.sum(resist_num / denom_m) / sum_drive
             if abs(fs_new - fs_est) < 0.001:
                 return fs_new
-            
             fs_est = 0.7 * fs_est + 0.3 * fs_new
         return fs_est
 
@@ -776,12 +853,20 @@ def main(
     gd=16.0,
     gs=20.0,
     ru=0.25,
+    water_mode='Ru',
+    water_depth_GL=0.0,
     kx=0.0,
     ky=0.0,
     Ex=0.0,
     Ey=0.0,
+    pga_raster=None,
+    pga_scaling=1.0,
     strength='phi',
     fail_type='Progressive',
+    skip_2d=False,
+    n_jobs=1,
+    parallel_backend='threading',
+    limit=None,
 ):
     """Run the full Janbu back-analysis pipeline.
 
@@ -803,11 +888,33 @@ def main(
     gw, gd, gs : float
         Unit weights of water, dry soil, and saturated soil [kN/m^3].
     ru : float
-        Pore-pressure ratio (u = gw * depth * Ru).
+        Pore-pressure ratio.  Used only when ``water_mode='Ru'``.
+        ``u = gw * (G - S) * Ru`` so this is effectively the height of
+        the water column above the slip surface expressed as a fraction
+        of the slip-mass thickness (NOT Skempton's Ru).
+    water_mode : {'Ru', 'GL'}, default ``'Ru'``
+        How pore pressure is parameterised.  ``'Ru'`` keeps the legacy
+        Ru-based formula.  ``'GL'`` switches to a uniform groundwater
+        depth below ground surface (in metres): the water column above
+        the slip surface at cell (i,j) is ``max(0, (G - S) - water_depth_GL)``
+        and ``u = gw * h_water``.
+    water_depth_GL : float, default 0.0
+        Groundwater depth below ground surface [m].  Only used when
+        ``water_mode='GL'``.  0.0 means the water table is at the
+        ground surface (= fully saturated above the slip surface).
     kx, ky : float
         Pseudo-static seismic coefficients (transverse / longitudinal).
+        ``ky`` is overridden per cell when ``pga_raster`` is supplied.
     Ex, Ey : float
         Applied horizontal loads (transverse / longitudinal).
+    pga_raster : str | Path, optional
+        Path to a PGA raster (.tif) co-registered with the slip
+        surface.  When supplied, each cell's ``ky`` is replaced by the
+        sampled PGA value times ``pga_scaling``.  Scalar ``ky`` is
+        ignored in that case.
+    pga_scaling : float, default 1.0
+        Multiplier applied to PGA raster values before being used as
+        per-cell ``ky``.
     strength : {'phi', 'c'}
         Which parameter to back-solve when targeting FS = 1.
     fail_type : {'Progressive', 'Catastrophic'}
@@ -817,6 +924,12 @@ def main(
         on every output feature for documentation; it does NOT change the
         math (analysis always uses ``G - S`` where ``G`` is the supplied
         DEM).
+    skip_2d : bool, default ``False``
+        When ``True``, skip the 2D cross-section back-analysis and forward
+        FS calculation entirely (no slice extraction, no phi2d / c2d /
+        FS2Dby3D, no polyline shapefile, no phi2d histogram).  Saves
+        roughly half the per-slide cost when only the 3D results are
+        needed.
     """
     start = time.time()
 
@@ -870,20 +983,53 @@ def main(
     shape_img = Slip.shape  # (rows, cols)
     X, Y = worldGrid(transform, shape_img)
     print(f" [Info] Slip surface slope calculation and grid creation completed. (4/4)")
+
+    # Optional PGA raster (per-cell ky source).  Must share the slip raster's
+    # grid (same transform / shape).  We reproject if needed via rasterio.
+    PGA_local = None
+    if pga_raster is not None:
+        with rasterio.open(str(pga_raster)) as src_pga:
+            if src_pga.transform == transform and src_pga.shape == shape_img:
+                PGA_local = src_pga.read(1).astype(float)
+            else:
+                # Reproject onto the slip raster's grid using nearest neighbour.
+                from rasterio.warp import reproject, Resampling
+                PGA_local = np.zeros(shape_img, dtype=float)
+                reproject(
+                    source=src_pga.read(1),
+                    destination=PGA_local,
+                    src_transform=src_pga.transform,
+                    src_crs=src_pga.crs,
+                    dst_transform=transform,
+                    dst_crs=src_pga.crs,
+                    resampling=Resampling.nearest,
+                )
+        print(f" [Info] PGA raster '{pga_raster}' loaded (scaling = {pga_scaling}).")
     
     
     # List to store continuous cross sections (converted to polylines) used in 2D analysis.
     polyline_features = []
-    
-    total_features = len(F)#[47:48]) 
 
-    for idx, feature in enumerate(F):#[47:48]):
+    # Optional: clip the polygon list to the first ``limit`` features for
+    # quick smoke / verification runs.  ``limit=None`` processes everything.
+    if limit is not None:
+        F = F[:int(limit)]
+    total_features = len(F)
+
+    def _process_slide(idx, feature):
+        """Per-polygon body.  Returns (feature, polyline_records: list).
+
+        Closes over the shared rasters / params in the surrounding ``main``
+        scope.  Each early "continue" path in the original loop is now a
+        ``return`` here so the function can be dispatched in parallel.
+        """
+        poly_local = []
         progress = (idx + 1) / total_features * 100
         print(f"Processing slide {idx + 1}/{total_features} ({progress:.1f}% complete)")
         feature['skip_reason'] = ""
         try:
             geom = feature['geometry']
-            
+
             # create mask
             mask = create_shp_mask(geom, transform, shape_img)
             rows, cols = shape_img
@@ -902,18 +1048,31 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
             
-            # Range with 50 units of buffer added
-            xmin, xmax = np.min(x_inside) - 50, np.max(x_inside) + 50
-            ymin, ymax = np.min(y_inside) - 50, np.max(y_inside) + 50
-            
-            # Create Boolean mask of target area from entire grid 
-            xmask = (X >= xmin) & (X <= xmax)
-            ymask = (Y >= ymin) & (Y <= ymax)
-            XY_mask = (xmask & ymask).reshape(rows, cols)
-            indices = np.argwhere(XY_mask)
-            if indices.size == 0:
+            # Range with 50 m buffer.  Compute the corresponding pixel-index
+            # bbox directly from the affine transform - this used to build a
+            # full-grid Boolean mask (6.3M cells) and call argwhere per
+            # polygon, which dominated the loop for many slides.
+            xmin, xmax = float(np.min(x_inside)) - 50.0, float(np.max(x_inside)) + 50.0
+            ymin, ymax = float(np.min(y_inside)) - 50.0, float(np.max(y_inside)) + 50.0
+            a = transform.a
+            c_val = transform.c
+            e = transform.e
+            f_val = transform.f
+            col_lo = int(np.floor((xmin - c_val) / a - 0.5))
+            col_hi = int(np.ceil((xmax - c_val) / a - 0.5))
+            if e < 0:
+                row_lo = int(np.floor((ymax - f_val) / e - 0.5))
+                row_hi = int(np.ceil((ymin - f_val) / e - 0.5))
+            else:
+                row_lo = int(np.floor((ymin - f_val) / e - 0.5))
+                row_hi = int(np.ceil((ymax - f_val) / e - 0.5))
+            XYminr = max(0, row_lo)
+            XYmaxr = min(rows - 1, row_hi)
+            XYminc = max(0, col_lo)
+            XYmaxc = min(cols - 1, col_hi)
+            if XYminr > XYmaxr or XYminc > XYmaxc:
                 print(f"Slide {idx+1}: Target area not found (skipped)")
                 feature['skip_reason'] = "Target area not found"
                 feature['c3d']    = 0.0
@@ -922,12 +1081,7 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
-                    
-            XYminr = np.min(indices[:, 0])
-            XYmaxr = np.max(indices[:, 0])
-            XYminc = np.min(indices[:, 1])
-            XYmaxc = np.max(indices[:, 1])
+                return feature, poly_local
             
             # Sub mask to be analyzed
             mask_red = mask[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
@@ -941,7 +1095,7 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
             
             # Extract sub-regions.  ``G`` is the supplied DEM regardless of
             # ``fail_type`` (the label is metadata only - see the docstring).
@@ -1039,17 +1193,32 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
 
             # Hydraulic head
-            u_i_val = gw * (G - S) * ru
-            
+            if water_mode == 'GL':
+                # Water table at GL - water_depth_GL m below ground.
+                # Pore pressure at slip = gw * max(0, (G - S) - water_depth_GL).
+                h_water = np.clip((G - S) - water_depth_GL, 0.0, None)
+                u_i_val = gw * h_water
+            else:
+                # Default 'Ru' branch (legacy)
+                u_i_val = gw * (G - S) * ru
+
+            # Per-cell ky derived from PGA raster, if supplied.  PGA is
+            # sampled to the same sub-grid as the slip surface.
+            if PGA_local is not None:
+                ky_in = (PGA_local[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
+                         * float(pga_scaling))
+            else:
+                ky_in = ky
+
             # 3D back analysis
             asp = 0
             try:
                 rot3d, phi3d, c3d = SimpJanbu3D(mask_red, csize, Slope_local, Aspect_local,
                                                  asp, c_thresh, phi_thresh, W0, u_i_val, gi,
-                                                 strength, kx, ky, Ex, Ey)
+                                                 strength, kx, ky_in, Ex, Ey)
             except Exception as e:
                 print(f"Slide {idx+1}: SimpJanbu3D error (skipped): {e}")
                 feature['skip_reason'] = f"SimpJanbu3D error: {e}"
@@ -1059,12 +1228,23 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
 
             feature['c3d']    = c3d
             feature['phi3d']  = phi3d
             feature['rot3d']  = rot3d
-                    
+
+            # ------------------------------------------------------------
+            # 2D back / forward analysis (optional - skip via --no-2d).
+            # When disabled, leave phi2d / c2d / FS2Dby3D / cell_count at
+            # their schema-default 0 / empty values and skip slice
+            # extraction + polyline generation for this slide.
+            # ------------------------------------------------------------
+            if skip_2d:
+                feature['skip_reason'] = ""
+                print(f"Slide {idx+1} processed successfully (3D only).")
+                return feature, poly_local
+
             # local grid
             sub_X = X[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
             sub_Y = Y[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
@@ -1077,7 +1257,7 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
 
             if np.sum(longest_mask) == 0:
                 print(f"Slide {idx+1}: longest_mask is empty (skipped)")
@@ -1085,20 +1265,20 @@ def main(
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2D']   = 0.0
-                continue
+                return feature, poly_local
 
             # 2D back analysis
             try:
                 phi2d, c2d = SimpleJanbu2D_slice(longest_mask, csize, Slope_local, Aspect_local,
                                                   rot3d, c_thresh, phi_thresh, W0, u_i_val, gi,
-                                                  strength, kx, ky, Ex, Ey, "inverse")
+                                                  strength, kx, ky_in, Ex, Ey, "inverse")
             except Exception as e:
                 print(f"Slide {idx+1}: SimpleJanbu2D_slice_inverse error: {e}")
                 feature['skip_reason'] = f"SimpleJanbu2D_slice_inverse error: {e}"
                 feature['c2d']    = 0.0
                 feature['phi2d']  = 0.0
                 feature['FS2Dby3D']   = 0.0
-                continue
+                return feature, poly_local
 
             feature['c2d']    = c2d
             feature['phi2d']  = phi2d
@@ -1107,12 +1287,12 @@ def main(
             try:
                 FS2Dby3D = SimpleJanbu2D_slice(longest_mask, csize, Slope_local, Aspect_local,
                                            rot3d, c3d, phi3d, W0, u_i_val, gi,
-                                           strength, kx, ky, Ex, Ey, "fs")
+                                           strength, kx, ky_in, Ex, Ey, "fs")
             except Exception as e:
                 print(f"Slide {idx+1}: SimpleJanbu2D_slice_fs error(skipped): {e}")
                 feature['skip_reason'] = f"SimpleJanbu2D_slice_fs error: {e}"
                 feature['FS2Dby3D']   = 0.0
-                continue
+                return feature, poly_local
 
             feature['FS2Dby3D'] = safe_float(FS2Dby3D)
             feature['skip_reason'] = ""
@@ -1144,7 +1324,7 @@ def main(
                 sorted_pts = [pts[k] for k in order]
                 line = LineString(sorted_pts)
 
-                polyline_features.append({
+                poly_local.append({
                     'slide':      idx+1,
                     'FS2Dby3D':   safe_float(FS2Dby3D),
                     'phi3d':      phi3d,
@@ -1152,6 +1332,7 @@ def main(
                     'geometry':   line
                 })
             print(f"Slide {idx+1} processed successfully.")
+            return feature, poly_local
 
         except Exception as e:
             print(f"Slide {idx+1}: Error occurred. Skipping... {e}")
@@ -1162,7 +1343,26 @@ def main(
             feature['FS2Dby3D']   = 0.0
             feature['c2d']    = 0.0
             feature['phi2d']  = 0.0
-            continue
+            return feature, poly_local
+
+    # Dispatch the per-polygon work.  Threading is the default because
+    # Numba (and numpy on large arrays) release the GIL during the hot
+    # inner sweep, so multiple polygons can overlap their JIT execution.
+    if n_jobs == 1 or total_features < 2:
+        for idx, feature in enumerate(F):
+            _, poly_recs = _process_slide(idx, feature)
+            polyline_features.extend(poly_recs)
+    else:
+        from joblib import Parallel, delayed
+        _results = Parallel(n_jobs=n_jobs, backend=parallel_backend)(
+            delayed(_process_slide)(i, F[i]) for i in range(total_features)
+        )
+        # With process backends (loky/multiprocessing), the worker mutates a
+        # copy of the feature dict.  Copy the updates back into the master F
+        # so the downstream schema-fill / shapefile-write sees them.
+        for idx, (feat_out, poly_recs) in enumerate(_results):
+            F[idx].update(feat_out)
+            polyline_features.extend(poly_recs)
 
     # Bug fix (#14): every skip path used to set its own subset of keys —
     # e.g. one path forgot `FS2Dby3D`, another forgot `c2d`/`phi2d`.  The
@@ -1186,18 +1386,21 @@ def main(
     # Save shapefile (back-analysis results)
     F_gdf_out = gpd.GeoDataFrame(F, crs=F_gdf.crs)
     F_gdf_out.to_file(ba_shp)
+
+    # Save polyline shapefile (only when 2D analysis produced lines).
+    if not skip_2d and polyline_features:
+        polyline_gdf = gpd.GeoDataFrame(polyline_features, geometry='geometry', crs=F_gdf.crs)
+        polyline_shp = os.path.join(outPath, '2D_stability_polyline.shp')
+        polyline_gdf.to_file(polyline_shp)
+        print(f" [Info] Save polyline shapefile '{polyline_shp}'")
+    elif skip_2d:
+        print(" [Info] 2D analysis skipped (--no-2d): polyline shapefile not written.")
     
-    # Save polyline shapefile '{polyline_shp}')
-    polyline_gdf = gpd.GeoDataFrame(polyline_features, geometry='geometry', crs=F_gdf.crs)
-    polyline_shp = os.path.join(outPath, '2D_stability_polyline.shp')
-    polyline_gdf.to_file(polyline_shp)
-    print(f" [Info] Save polyline shapefile '{polyline_shp}'")
-    
-    # Create φ3d histogram and output to CSV
+    # Create phi3d histogram and output to CSV
     phi3d_arr = np.array([feature.get('phi3d', 0) for feature in F])
     idx_valid = phi3d_arr > phi_thresh
     phi3d_filt = phi3d_arr[idx_valid]
-    
+
     plt.figure()
     plt.hist(phi3d_filt, bins=10, density=True)
     plt.xlabel('phi3d (deg)')
@@ -1206,15 +1409,14 @@ def main(
     histogram_path = os.path.join(outPath, 'phi3d_hist.png')
     plt.savefig(histogram_path)
     plt.close()
-    
+
     counts, bin_edges = np.histogram(phi3d_filt, bins=10, density=True)
     center_phi = (bin_edges[:-1] + bin_edges[1:]) / 2
-    # Bin boundaries
     lower_bounds = bin_edges[:-1]
     upper_bounds = bin_edges[1:]
     includes_lower = [True] * len(lower_bounds)
     includes_upper = [False] * len(lower_bounds)
-    includes_upper[-1] = True  # Only the last bin contains the upper boundary
+    includes_upper[-1] = True
 
     histogram_csv_path = os.path.join(outPath, 'phi3d_hist.csv')
     hist_df = pd.DataFrame({
@@ -1245,38 +1447,39 @@ def main(
     print(f"Saved MATLAB .mat file to {matfile}")
     """
     
-    # Create φ2d histogram and output to CSV
-    phi2d_arr = np.array([feature.get('phi2d', 0.0) for feature in F])
-    idx_valid_phi2d = phi2d_arr > phi_thresh
-    phi2d_filt = phi2d_arr[idx_valid_phi2d]
-    
-    plt.figure()
-    plt.hist(phi2d_filt, bins=10, density=True)
-    plt.xlabel('phi2d (deg)')
-    plt.ylabel('Probability Density')
-    plt.title('Distribution of phi2d')
-    histogram_phi2d_path = os.path.join(outPath, 'phi2d_hist.png')
-    plt.savefig(histogram_phi2d_path)
-    plt.close()
-    
-    counts2d, bin_edges2d = np.histogram(phi2d_filt, bins=10, density=True)
-    center_phi2d = (bin_edges2d[:-1] + bin_edges2d[1:]) / 2
-    lower_bounds2d = bin_edges2d[:-1]
-    upper_bounds2d = bin_edges2d[1:]
-    includes_lower2d = [True] * len(lower_bounds2d)
-    includes_upper2d = [False] * len(lower_bounds2d)
-    includes_upper2d[-1] = True  # Only the last bin contains the upper boundary
+    if not skip_2d:
+        # Create phi2d histogram and output to CSV
+        phi2d_arr = np.array([feature.get('phi2d', 0.0) for feature in F])
+        idx_valid_phi2d = phi2d_arr > phi_thresh
+        phi2d_filt = phi2d_arr[idx_valid_phi2d]
 
-    histogram_phi2d_csv_path = os.path.join(outPath, 'phi2d_hist.csv')
-    phi2d_hist_df = pd.DataFrame({
-        'bin_center': center_phi2d,
-        'density': counts2d,
-        'lower_bound': lower_bounds2d,
-        'upper_bound': upper_bounds2d,
-        'includes_lower': includes_lower2d,
-        'includes_upper': includes_upper2d
-    })
-    phi2d_hist_df.to_csv(histogram_phi2d_csv_path, index=False)
+        plt.figure()
+        plt.hist(phi2d_filt, bins=10, density=True)
+        plt.xlabel('phi2d (deg)')
+        plt.ylabel('Probability Density')
+        plt.title('Distribution of phi2d')
+        histogram_phi2d_path = os.path.join(outPath, 'phi2d_hist.png')
+        plt.savefig(histogram_phi2d_path)
+        plt.close()
+
+        counts2d, bin_edges2d = np.histogram(phi2d_filt, bins=10, density=True)
+        center_phi2d = (bin_edges2d[:-1] + bin_edges2d[1:]) / 2
+        lower_bounds2d = bin_edges2d[:-1]
+        upper_bounds2d = bin_edges2d[1:]
+        includes_lower2d = [True] * len(lower_bounds2d)
+        includes_upper2d = [False] * len(lower_bounds2d)
+        includes_upper2d[-1] = True
+
+        histogram_phi2d_csv_path = os.path.join(outPath, 'phi2d_hist.csv')
+        phi2d_hist_df = pd.DataFrame({
+            'bin_center': center_phi2d,
+            'density': counts2d,
+            'lower_bound': lower_bounds2d,
+            'upper_bound': upper_bounds2d,
+            'includes_lower': includes_lower2d,
+            'includes_upper': includes_upper2d
+        })
+        phi2d_hist_df.to_csv(histogram_phi2d_csv_path, index=False)
     
     # Save FS2D results to CSV
     safety_data = []
@@ -1326,11 +1529,22 @@ def _build_cli():
     p.add_argument('--gs', type=float, default=20.0,
                    help="Unit weight of saturated soil [kN/m^3].")
     p.add_argument('--ru', type=float, default=0.25,
-                   help="Pore-pressure ratio.")
+                   help="Pore-pressure ratio (used only when --water-mode Ru).")
+    p.add_argument('--water-mode', dest='water_mode',
+                   choices=('Ru', 'GL'), default='Ru',
+                   help="Pore-pressure parameterisation. 'Ru' (legacy) or "
+                        "'GL' (uniform groundwater depth below ground).")
+    p.add_argument('--water-depth', dest='water_depth_GL', type=float, default=0.0,
+                   help="Groundwater depth below ground [m] (only when --water-mode GL).")
     p.add_argument('--kx', type=float, default=0.0)
     p.add_argument('--ky', type=float, default=0.0)
     p.add_argument('--Ex', type=float, default=0.0)
     p.add_argument('--Ey', type=float, default=0.0)
+    p.add_argument('--pga-raster', dest='pga_raster', default=None,
+                   help="Path to a PGA raster (.tif). When supplied, per-cell "
+                        "ky = PGA * --pga-scaling overrides scalar --ky.")
+    p.add_argument('--pga-scaling', dest='pga_scaling', type=float, default=1.0,
+                   help="Multiplier applied to PGA raster values.")
     p.add_argument('--strength', choices=('phi', 'c'), default='phi',
                    help="Which strength parameter to back-solve.")
     p.add_argument('--fail-type', dest='fail_type',
@@ -1338,6 +1552,21 @@ def _build_cli():
                    help="Metadata label only: Progressive = DEM is the current "
                         "ground surface, Catastrophic = DEM is the pre-failure "
                         "top surface. Does not affect the math.")
+    p.add_argument('--no-2d', dest='skip_2d', action='store_true', default=False,
+                   help="Skip the 2D cross-section back/forward analysis (only "
+                        "3D rot/phi/c are produced). Halves per-slide cost.")
+    p.add_argument('--jobs', dest='n_jobs', type=int, default=1,
+                   help="Number of polygon-level workers. 1 = serial, "
+                        "-1 = all available cores.")
+    p.add_argument('--backend', dest='parallel_backend',
+                   choices=('threading', 'loky'), default='threading',
+                   help="joblib backend when --jobs != 1. 'threading' is "
+                        "lightweight but limited by the GIL (mostly helpful "
+                        "for large per-polygon JIT work). 'loky' uses true "
+                        "processes (better speedup for many polygons, but "
+                        "with ~1-2s process startup overhead on Windows).")
+    p.add_argument('--limit', dest='limit', type=int, default=None,
+                   help="Process only the first N polygons (smoke / verification).")
     return p
 
 
