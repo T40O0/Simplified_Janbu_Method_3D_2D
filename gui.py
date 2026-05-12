@@ -163,7 +163,7 @@ with st.sidebar.expander("Expected input layout", expanded=False):
 |---|---|
 | Polygon shapefile (.shp) | `{INPUT_DIR.relative_to(REPO).as_posix()}/**/*.shp` |
 | Slip-surface raster (.tif) | `{INPUT_DIR.relative_to(REPO).as_posix()}/**/*.tif` |
-| Ground DEM raster (.tif) | same |
+| DEM raster (.tif) | same (a single DEM - label its role below) |
 
 The pickers walk the `input/` tree, so subfolders such as `input/SHP/` are
 fine.  You can also paste an absolute path into the text fallback.
@@ -203,22 +203,19 @@ poly_path = _picker("Landslide polygon (.shp)", shp_files, "poly",
                          "table is preserved in the output.")
 slip_path = _picker("Slip surface raster (.tif)", tif_files, "slip",
                     help="Elevation of the failure surface.")
-dem_path = _picker("Ground DEM raster (.tif)", tif_files, "dem",
-                   help="Pre-failure ground surface (used for Progressive "
-                        "fail type).")
+dem_path = _picker("DEM raster (.tif)", tif_files, "dem",
+                   help="A single ground / top DEM. Use the radio below to "
+                        "label what it represents.")
 
-fail_type = st.sidebar.radio(
-    "Fail type",
-    ["Progressive (uses DEM as ground surface)",
-     "Catastrophic (uses TOP raster)"], index=0, disabled=DIS,
-    key="fail_type_radio")
-fail_type = "Progressive" if fail_type.startswith("Progressive") else "Catastrophic"
-
-if fail_type == "Catastrophic":
-    top_path = _picker("TOP raster (.tif)", tif_files, "top",
-                       help="Post-failure top surface for the Catastrophic branch.")
-else:
-    top_path = None
+# fail_type is a metadata label only - the math always uses (DEM - Slip).
+fail_type_label = st.sidebar.radio(
+    "DEM represents",
+    ["Post-failure / current ground surface (Progressive)",
+     "Pre-failure top surface (Catastrophic)"],
+    index=0, disabled=DIS, key="fail_type_radio",
+    help="Recorded on every output feature as `fail_type` for documentation; "
+         "does not change the calculation.")
+fail_type = "Progressive" if fail_type_label.startswith("Post") else "Catastrophic"
 
 
 # ---- Solver parameters -----------------------------------------------------
@@ -289,8 +286,6 @@ st.sidebar.subheader("Run")
 
 _missing = [n for n, p in [("polygon", poly_path), ("slip", slip_path),
                             ("DEM", dem_path)] if p is None]
-if fail_type == "Catastrophic" and top_path is None:
-    _missing.append("TOP")
 _block = (DIS or (folder_dirty and not overwrite_ok) or bool(_missing))
 
 if _missing:
@@ -319,22 +314,19 @@ if "output_dir" not in st.session_state:
 
 
 def _build_cmd():
-    cmd = [PYTHON_EXE, "-u", str(DRIVER),
-           "--poly", str(poly_path),
-           "--slip", str(slip_path),
-           "--dem", str(dem_path),
-           "--out", str(out_path_preview),
-           "--phi-init", str(phi_init),
-           "--c-init", str(c_init),
-           "--gw", str(gw), "--gd", str(gd), "--gs", str(gs),
-           "--ru", str(ru),
-           "--kx", str(kx), "--ky", str(ky),
-           "--Ex", str(Ex), "--Ey", str(Ey),
-           "--strength", strength,
-           "--fail-type", fail_type]
-    if top_path is not None:
-        cmd += ["--top", str(top_path)]
-    return cmd
+    return [PYTHON_EXE, "-u", str(DRIVER),
+            "--poly", str(poly_path),
+            "--slip", str(slip_path),
+            "--dem", str(dem_path),
+            "--out", str(out_path_preview),
+            "--phi-init", str(phi_init),
+            "--c-init", str(c_init),
+            "--gw", str(gw), "--gd", str(gd), "--gs", str(gs),
+            "--ru", str(ru),
+            "--kx", str(kx), "--ky", str(ky),
+            "--Ex", str(Ex), "--Ey", str(Ey),
+            "--strength", strength,
+            "--fail-type", fail_type]
 
 
 # ---- Start: spawn detached subprocess -------------------------------------

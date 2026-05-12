@@ -769,7 +769,6 @@ def main(
     poly_shp=None,
     slip_tif=None,
     dem_tif=None,
-    top_tif=None,
     out_path=None,
     phi_thresh=1.0,
     c_thresh=1.0,
@@ -794,17 +793,17 @@ def main(
     Parameters
     ----------
     poly_shp, slip_tif, dem_tif : str | Path, optional
-        Input file paths.  ``top_tif`` defaults to ``dem_tif`` when omitted,
-        matching the legacy "TOP also uses the same file" behaviour.
+        Input file paths.  Exactly one DEM is consumed; ``fail_type`` is a
+        metadata label describing what that DEM represents.
     out_path : str | Path, optional
         Output directory; auto-created if missing.
     phi_thresh, c_thresh : float
-        Initial guesses for friction angle [deg] and cohesion [kN/m²] fed
+        Initial guesses for friction angle [deg] and cohesion [kN/m^2] fed
         into the back-analysis inner loop.
     gw, gd, gs : float
-        Unit weights of water, dry soil, and saturated soil [kN/m³].
+        Unit weights of water, dry soil, and saturated soil [kN/m^3].
     ru : float
-        Pore-pressure ratio (u = γ_w · depth · Ru).
+        Pore-pressure ratio (u = gw * depth * Ru).
     kx, ky : float
         Pseudo-static seismic coefficients (transverse / longitudinal).
     Ex, Ey : float
@@ -812,8 +811,12 @@ def main(
     strength : {'phi', 'c'}
         Which parameter to back-solve when targeting FS = 1.
     fail_type : {'Progressive', 'Catastrophic'}
-        ``Progressive`` uses the DEM raster as ground surface; ``Catastrophic``
-        uses the TOP raster.
+        Metadata label describing what the supplied DEM represents:
+        ``Progressive`` = current (post-failure) ground surface,
+        ``Catastrophic`` = pre-failure top surface.  The label is recorded
+        on every output feature for documentation; it does NOT change the
+        math (analysis always uses ``G - S`` where ``G`` is the supplied
+        DEM).
     """
     start = time.time()
 
@@ -822,7 +825,6 @@ def main(
     poly_shp = poly_shp if poly_shp is not None else os.path.join(inPath, 'landslide_poly.shp')
     slip_tif = slip_tif if slip_tif is not None else os.path.join(inPath, 'slide.tif')
     dem_tif = dem_tif if dem_tif is not None else os.path.join(inPath, 'DEM10.tif')
-    top_tif = top_tif if top_tif is not None else dem_tif
     outPath = str(out_path) if out_path is not None else 'output'
 
     gi = (gd + gs) / 2
@@ -833,35 +835,33 @@ def main(
     # end of a long batch run.
     os.makedirs(outPath, exist_ok=True)
 
-    # Read landslide extents (use attributes.shp for aspect)
+    # Read landslide extents
     dep_shp = str(poly_shp)
     F_gdf = gpd.read_file(dep_shp)
     F = F_gdf.to_dict('records')
-    print(f" [Info] Shapefile '{dep_shp}' has been read. (1/5)")
+    print(f" [Info] Shapefile '{dep_shp}' has been read. (1/4)")
 
     # Name output extents
     ba_shp = os.path.join(outPath, 'back_analysis.shp')
 
-    # Read slip surface DEM
+    # Read slip surface raster
     slip_surf = str(slip_tif)
     with rasterio.open(slip_surf) as src:
         Slip = src.read(1)
         transform = src.transform
         csize = src.res[0]  # Assume square cells
-    print(f" [Info] TIF file '{slip_surf}' has been read. (2/5)")
+    print(f" [Info] TIF file '{slip_surf}' has been read. (2/4)")
 
-    # Read ground surfaces (Progressive)
+    # Read the ground surface raster.  The original MATLAB / earlier Python
+    # port read two DEMs (DEM + TOP) and switched between them per fail_type,
+    # but only one was ever consumed.  The interface is now "one DEM raster;
+    # fail_type just labels what it represents".
     dem_surf = str(dem_tif)
     with rasterio.open(dem_surf) as src:
         DEM = src.read(1)
-    print(f" [Info] TIF file '{dem_surf}' has been read. (3/5)")
+    print(f" [Info] TIF file '{dem_surf}' has been read "
+          f"(treated as {fail_type}). (3/4)")
 
-    # TOP raster used by the 'Catastrophic' branch (defaults to DEM)
-    top_surf = str(top_tif)
-    with rasterio.open(top_surf) as src:
-        TOP = src.read(1)
-    print(f" [Info] TIF file '{top_surf}' has been read. (4/5)")
-    
     # Calculate slip surface slope, aspect (gradient_king function)
     # Bug fix (#15): gradient_king no longer returns the unused dz/dx, dz/dy
     # arrays.  Both the original MATLAB and this Python port computed them
@@ -869,7 +869,7 @@ def main(
     SLOPE, ASPECT = gradient_king(Slip, csize)
     shape_img = Slip.shape  # (rows, cols)
     X, Y = worldGrid(transform, shape_img)
-    print(f" [Info] Slip surface slope calculation and grid creation completed. (5/5)")
+    print(f" [Info] Slip surface slope calculation and grid creation completed. (4/4)")
     
     
     # List to store continuous cross sections (converted to polylines) used in 2D analysis.
@@ -943,12 +943,10 @@ def main(
                 feature['FS2D']   = 0.0
                 continue
             
-            # Extract sub-regions
-            S = Slip[XYminr:XYmaxr+1, XYminc:XYmaxc+1]  # Slip surface
-            if fail_type == 'Progressive':
-                G = DEM[XYminr:XYmaxr+1, XYminc:XYmaxc+1] # Ground surface DEM
-            else:
-                G = TOP[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
+            # Extract sub-regions.  ``G`` is the supplied DEM regardless of
+            # ``fail_type`` (the label is metadata only - see the docstring).
+            S = Slip[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
+            G = DEM[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
             Slope_local = SLOPE[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
             Aspect_local = ASPECT[XYminr:XYmaxr+1, XYminc:XYmaxc+1]
             
@@ -1025,6 +1023,10 @@ def main(
             feature['g_i'] = float(gi)
             feature['Ru'] = float(ru)
             feature['Rgh'] = float(Rgh)
+            # Stamp the analysis-mode label on every feature so downstream
+            # consumers can tell whether a run was treated as Progressive
+            # or Catastrophic (fail_type does not affect the math).
+            feature['fail_type'] = str(fail_type)
             
             # Volume
             W0 = (csize * csize) * (G - S)
@@ -1174,6 +1176,7 @@ def main(
         'cell_count': 0,
         'g_d': 0.0, 'g_s': 0.0, 'g_w': 0.0, 'g_i': 0.0,
         'Ru': 0.0, 'Rgh': 0.0,
+        'fail_type': str(fail_type),
         'skip_reason': "",
     }
     for feature in F:
@@ -1308,10 +1311,8 @@ def _build_cli():
     p.add_argument('--slip', dest='slip_tif', default=None,
                    help="Slip-surface raster (.tif).")
     p.add_argument('--dem', dest='dem_tif', default=None,
-                   help="Ground-surface DEM raster (.tif).")
-    p.add_argument('--top', dest='top_tif', default=None,
-                   help="TOP surface raster (used when fail-type=Catastrophic). "
-                        "Defaults to --dem.")
+                   help="Ground-surface DEM raster (.tif). Exactly one DEM is "
+                        "needed; use --fail-type to label what it represents.")
     p.add_argument('--out', dest='out_path', default=None,
                    help="Output directory.")
     p.add_argument('--phi-init', dest='phi_thresh', type=float, default=1.0,
@@ -1334,8 +1335,9 @@ def _build_cli():
                    help="Which strength parameter to back-solve.")
     p.add_argument('--fail-type', dest='fail_type',
                    choices=('Progressive', 'Catastrophic'), default='Progressive',
-                   help="Use DEM (Progressive) or TOP (Catastrophic) for ground "
-                        "surface.")
+                   help="Metadata label only: Progressive = DEM is the current "
+                        "ground surface, Catastrophic = DEM is the pre-failure "
+                        "top surface. Does not affect the math.")
     return p
 
 
