@@ -263,11 +263,26 @@ with st.sidebar.expander("Seismic / external loads", expanded=False):
 
 # ---- Output destination ----------------------------------------------------
 st.sidebar.subheader("Output")
-out_root = st.sidebar.text_input("Output folder", value=str(OUTPUT_DIR),
-                                  key="out_root", disabled=DIS)
-out_path_preview = Path(out_root)
+out_root = st.sidebar.text_input(
+    "Parent directory", value=str(OUTPUT_DIR), key="out_root", disabled=DIS,
+    help="Parent folder where results are written. Each run goes into a "
+         "sub-folder under this directory.")
+test_no = st.sidebar.number_input(
+    "test_no (run ID, integer)", 1, 99999, 1, 1, key="test_no", disabled=DIS,
+    help="Used as the sub-folder name when 'Run ID / sub-folder name' is "
+         "empty (zero-padded to 5 digits, e.g. 00001).")
+custom_run_name = st.sidebar.text_input(
+    "Run ID / sub-folder name (empty = test_no zero-padded)",
+    value="", key="custom_run_name", disabled=DIS,
+    help="Free-form sub-folder name. Leave blank to use test_no.")
 
-# Overwrite warning
+# Effective sub-folder name (susname) - matches the template's convention.
+susname = custom_run_name.strip() if custom_run_name.strip() \
+    else f"{int(test_no):05d}"
+out_path_preview = Path(out_root) / susname
+st.sidebar.caption(f"Output: `{Path(out_root).name}/{susname}/`")
+
+# Overwrite warning - applies only to the susname sub-folder.
 folder_dirty = (out_path_preview.exists() and out_path_preview.is_dir()
                 and any(p for p in out_path_preview.iterdir()
                         if p.name not in (".gui_manifest.json",
