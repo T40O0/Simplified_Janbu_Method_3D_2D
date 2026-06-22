@@ -43,7 +43,15 @@ File names are free-form: the GUI lets you pick any `.shp` / `.tif` under
 `output/back_analysis.shp` so you can carry your own attributes through.
 
 The rasters must share a CRS and grid with the polygons; cell size is read
-from the slip raster's `transform`.
+from the slip raster's `transform`. The DEM is **not** resampled, so it must
+sit on exactly the same grid (CRS / transform / shape) as the slip raster.
+
+**Shapefile encoding:** the polygon `.dbf` is read using the encoding
+declared in its `.cpg`. Japanese (and other non-ASCII) shapefiles are often
+`CP932` / `Shift_JIS` even when the `.cpg` wrongly says `UTF-8`; a mismatch
+raises `UnicodeDecodeError` on load. Fix the `.cpg` to the actual encoding
+(e.g. write `CP932`). Attribute values are otherwise passed through to the
+output unchanged.
 
 ### About `fail_type`
 The `--fail-type` flag (`Progressive` | `Catastrophic`) is a **metadata
@@ -92,6 +100,20 @@ coefficient: `--pga-raster path/to/PGA.tif --pga-scaling 1.0`. Each cell's
 effective `ky` becomes `PGA_cell * pga_scaling` (i.e. `K_h = PGA × scaling`);
 `kx` remains scalar. If the PGA raster is on a different grid, it is
 nearest-neighbour resampled onto the slip-surface grid internally.
+
+The PGA input must be a **raster** (`.tif`). If your PGA is a polygon /
+mesh shapefile, rasterize it first (e.g. `rasterio.features.rasterize`
+onto the slip-surface grid).
+
+**Units matter.** `ky` is a dimensionless seismic coefficient, so the
+raster values × `pga_scaling` must come out dimensionless. If your raster
+stores PGA in gal (cm/s²), either set `--pga-scaling` ≈ `1/980` (gal → g)
+or bake the conversion into the raster so it stores `PGA/g` directly.
+Note that the per-cell `ky` is the **full** `PGA × scaling`; pseudo-static
+practice usually applies only a fraction of `PGA/g` (commonly
+`kh ≈ 0.5·PGA/g`, Hynes-Griffin & Franklin 1984), so choose `pga_scaling`
+accordingly rather than driving the slope with the raw peak. See
+`Disclaimer.md`.
 
 #### Other CLI flags
 

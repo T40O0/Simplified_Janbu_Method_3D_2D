@@ -13,7 +13,15 @@ legal terms — that users should understand before relying on the outputs.
   not performed.
 - Pore pressure is steady-state (Ru ratio or uniform GL depth).
   Time-dependent flow and unsaturated effects are not modelled.
-- Seismic loading is pseudo-static (`K_h = PGA × pseudo_scaling`).
+- Seismic loading is pseudo-static (`K_h = PGA × pseudo_scaling`). The
+  per-cell `K_h` is applied at full magnitude; the user is responsible for
+  choosing a sensible coefficient. Pseudo-static `kh` is normally only a
+  fraction of `PGA/g` (commonly `kh ≈ 0.5·PGA/g`; design practice often uses
+  `kh ≈ 0.1–0.25`). Feeding the raw observed `PGA/g` over-drives the
+  back-analysis and inflates the inferred strength. Design regional factors
+  (e.g. the Japanese 道路橋示方書 `cz` / `cⅡz`) modify a *standard design
+  motion* and are not interchangeable with a coefficient scaling an
+  *observed* PGA field.
 
 ## Inputs and outputs
 
