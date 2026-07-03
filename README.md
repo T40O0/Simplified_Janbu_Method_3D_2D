@@ -201,66 +201,11 @@ small (~16–40 ms) and most of the wall time on small batches is fixed
 startup. Polygon-level parallel workers (`--jobs > 1`) typically do **not**
 help at this scale and may be slower than serial.
 
-## Algorithm corrections (change numerical results)
-
-A focused audit of the calculation core produced the following corrections.
-These **change the back-analysed numbers** relative to earlier commits (and
-relative to the original MATLAB, which carried some of the same issues), so
-results from before this pass are not directly comparable:
-
- - **3D longitudinal `m_alpha`**: the Janbu factor now uses the longitudinal
-   apparent-dip cosine `cos²(dy)·(1 + tan(dy)·tanφ/FS)` instead of the
-   true-3D direction cosine that had leaked in. The old form inflated the
-   resisting force on laterally-inclined (side-scarp) cells and biased
-   back-solved φ low (up to ~5° on strongly cross-dipping cells).
- - **`m_alpha` floors**: both the 3D and 2D balances now floor `m_alpha` at
-   `0.1`, so counter-dipping cells can no longer drive the denominator
-   through zero and produce a `±∞` / sign-flipped resistance spike.
- - **2D slice weight**: the 2D balance is per-unit-out-of-plane-width, so the
-   weight is now `W0·gs·b/csize²` (commensurate with the `c·b` / `u·b`
-   terms). Previously the full 3D column weight was used, understating the
-   cohesion / pore-pressure influence by a factor of ~`csize` (exact only on
-   1 m grids); φ2d / c2d / FS2D were biased on coarser grids.
- - **Convergence is now reported, not faked**: `SimpJanbu3D` returns an
-   explicit success flag and the 2D solver returns `NaN` on failure. A slide
-   whose search does not reach FS = 1 is recorded with `ok3d = 0` and a
-   `skip_reason` instead of silently emitting the initial guesses as if they
-   were converged results. The 3D cohesion sweep cap was also raised from
-   `c₀+50` to `c₀+500` kPa.
- - **NaN / nodata handling**: raster nodata is mapped to `NaN` and those
-   cells are dropped from each slide's mask before the force sums, so a
-   single nodata cell no longer poisons the whole slide.
- - **PGA reprojection CRS**: the PGA raster is now reprojected using the slip
-   raster's CRS (the destination CRS was previously set to the PGA raster's
-   own CRS, so a differently-projected PGA raster silently produced `ky = 0`
-   everywhere).
- - **Histograms follow `--strength`**: cohesion runs bin the back-solved
-   `c3d` / `c2d` (written as `c3d_hist.*` / `c2d_hist.*`) instead of the
-   constant φ; the strict `> phi_init` filter that dropped legitimately
-   marginal slides was replaced with the `ok3d` convergence flag.
- - **Oblique 2D sections**: the deepest-slice extractor now keeps one cell
-   per along-track step, so sections near 45° azimuth no longer capture two
-   parallel cell columns (which doubled the slice count and made the output
-   polyline zigzag).
-
-## Recent fixes
-A second audit against the original MATLAB (Bunn et al. 2020) sources surfaced
-the following corrections beyond the initial port:
-
- - 2D analysis now converts the per-cell volume to a weight (further refined to a per-unit-width slice weight — see *Algorithm corrections* above — so the cohesion / pore-pressure and gravity terms are dimensionally consistent).
- - 2D drive term now includes `ky·W + Ey` so the seismic / external-load arguments are no longer silently ignored.
- - 3D transverse force balance uses the transverse normal `Nx` in `term2x` (the MATLAB reference inherited the same bug, biasing the rot3d search).
- - The outer rot3d search now reproduces the MATLAB direction-reversal heuristic, and the inner FS loop drops a fragile (1.00, 1.10) acceptance window in favour of a clean `FRy ≥ FDy` break.
- - `gradient_king` is fully vectorised; the unused `dz/dx`, `dz/dy` outputs were removed.
- - Various robustness fixes: auto-create output directory, suppress blocking `plt.show()` in batch loops, silence `np.nanmean` warnings, and normalise the GeoDataFrame schema so skip paths do not leave NaN-riddled columns.
-
 ## Recent optimisations
 
 A profile-driven optimisation pass gives an ~11–22× speed-up on the sample
-dataset depending on polygon count. (The optimisations themselves are
-numerically neutral — within ~2.3 × 10⁻⁸ of the pre-optimisation baseline;
-the separate *Algorithm corrections* above intentionally change the
-results.)
+dataset depending on polygon count (numerically neutral — within
+~2.3 × 10⁻⁸ of the pre-optimisation baseline):
 
  - **bbox-clipped point-in-polygon**: `create_shp_mask` now tests only the
    polygon's pixel-index bounding box instead of the full 6.3 M-cell raster.
