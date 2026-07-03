@@ -5,7 +5,7 @@
 __pycache__/
 *.py[cod]
 
-# Claude Code workspace metadata
+# Workspace metadata
 .claude/
 
 # Local input data and run outputs (do not publish)

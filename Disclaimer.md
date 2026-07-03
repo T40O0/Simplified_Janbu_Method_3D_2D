@@ -32,6 +32,10 @@ legal terms — that users should understand before relying on the outputs.
   measurements. Changing the assumptions changes the inferred values.
 - `shear_strength.mat` describes the population of back-calculated
   values, not soil-mechanics ground truth.
+- Convergence is reported explicitly: slides whose search does not reach
+  FS = 1 carry `ok3d = 0` and a `skip_reason` (rather than the initial
+  guesses), and failed 2D steps write `NaN`. Only converged slides
+  (`ok3d = 1`) enter the histograms and `shear_strength.mat`.
 
 ## Differences from the reference implementation
 

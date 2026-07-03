@@ -72,7 +72,19 @@ def pid_alive(pid) -> bool:
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5)
-            return str(pid) in (out.stdout or "")
+            # Parse the CSV precisely: the old bare substring match ("123" in
+            # stdout) false-positived on other PIDs / memory figures, and a
+            # reused PID could belong to an unrelated process that Stop would
+            # then taskkill.  Our child is always a Python process, so demand
+            # an exact PID match AND a python image name.
+            for line in (out.stdout or "").splitlines():
+                line = line.strip()
+                if not line.startswith('"'):
+                    continue
+                parts = [p.strip('"') for p in line.split('","')]
+                if len(parts) >= 2 and parts[1] == str(pid):
+                    return "python" in parts[0].lower()
+            return False
         except Exception:
             return False
     try:
@@ -183,7 +195,9 @@ def _picker(label: str, files: list[Path], key: str, *,
             help: str | None = None):
     rel = [str(p.relative_to(INPUT_DIR)) for p in files]
     options = ["(choose...)"] + rel + ["[Enter custom path]"]
-    selected = st.sidebar.selectbox(label, options, index=1 if rel else 0,
+    # Default to "(choose...)": preselecting the first file made the slip and
+    # DEM pickers silently start on the SAME raster (G - S = 0 everywhere).
+    selected = st.sidebar.selectbox(label, options, index=0,
                                     key=f"sel_{key}", disabled=DIS, help=help)
     if selected == "[Enter custom path]":
         custom = st.sidebar.text_input(
@@ -286,10 +300,10 @@ with st.sidebar.expander("Seismic / external loads", expanded=False):
                                     "slip direction. Also used by the 2D "
                                     "analysis.")
     elif pga_mode == "raster (PGA tif)":
-        pga_files = _scan("*.tif") if "_scan" in dir() else []  # may be undefined
-        # _scan is defined later in the file; build pickers similarly here.
+        # Reuse the tif list the slip/DEM pickers already scanned (includes
+        # upper-case extensions, sorted) instead of a divergent inline rglob.
         pga_options = ["(choose...)"] + [
-            str(p.relative_to(INPUT_DIR)) for p in INPUT_DIR.rglob("*.tif")
+            str(p.relative_to(INPUT_DIR)) for p in tif_files
         ] + ["[Enter custom path]"]
         sel = st.selectbox("PGA raster (.tif)", pga_options, index=0,
                             disabled=DIS, key="pga_sel",
@@ -361,10 +375,23 @@ st.sidebar.subheader("Run")
 
 _missing = [n for n, p in [("polygon", poly_path), ("slip", slip_path),
                             ("DEM", dem_path)] if p is None]
-_block = (DIS or (folder_dirty and not overwrite_ok) or bool(_missing))
+# In raster seismic mode an unpicked PGA file used to silently drop
+# --pga-raster and run fully aseismic; block Start instead.
+if pga_mode == "raster (PGA tif)" and not pga_raster_path:
+    _missing.append("PGA raster")
+# Identical slip and DEM rasters make G - S = 0 everywhere (every slide
+# skipped after a full run) - almost certainly a picker mistake.
+_same_raster = (slip_path is not None and dem_path is not None
+                and str(slip_path) == str(dem_path))
+if _same_raster:
+    st.sidebar.error("Slip surface and DEM must be different rasters.")
+_block = (DIS or (folder_dirty and not overwrite_ok) or bool(_missing)
+          or _same_raster)
 
 if _missing:
     _btn_label = f"Pick missing inputs: {', '.join(_missing)}"
+elif _same_raster:
+    _btn_label = "Slip and DEM are the same file"
 elif IS_RUNNING:
     _btn_label = "Running..."
 elif folder_dirty and not overwrite_ok:
@@ -529,10 +556,19 @@ if out_dir is None:
 
 if out_dir and Path(out_dir).exists():
     results_csv = out_dir / "results.csv"
-    phi3d_png = out_dir / "phi3d_hist.png"
-    phi2d_png = out_dir / "phi2d_hist.png"
-    phi3d_csv = out_dir / "phi3d_hist.csv"
-    phi2d_csv = out_dir / "phi2d_hist.csv"
+
+    def _first_existing(*names: str) -> Path:
+        # c-mode runs write c3d_hist.* / c2d_hist.* instead of phi*_hist.*.
+        for name in names:
+            p = out_dir / name
+            if p.exists():
+                return p
+        return out_dir / names[0]
+
+    phi3d_png = _first_existing("phi3d_hist.png", "c3d_hist.png")
+    phi2d_png = _first_existing("phi2d_hist.png", "c2d_hist.png")
+    phi3d_csv = _first_existing("phi3d_hist.csv", "c3d_hist.csv")
+    phi2d_csv = _first_existing("phi2d_hist.csv", "c2d_hist.csv")
     shear_mat = out_dir / "shear_strength.mat"
     ba_shp = out_dir / "back_analysis.shp"
     poly_shp = out_dir / "2D_stability_polyline.shp"
@@ -546,13 +582,18 @@ if out_dir and Path(out_dir).exists():
             import pandas as pd
             df = pd.read_csv(results_csv)
             n_total = len(df)
-            n_ok = int((df.get("phi3d", pd.Series(dtype=float)) > 0).sum())
+            if "ok3d" in df.columns:
+                n_ok = int((df["ok3d"] == 1).sum())
+                ok_label = "Solved (3D converged)"
+            else:
+                n_ok = int((df.get("phi3d", pd.Series(dtype=float)) > 0).sum())
+                ok_label = "Solved (phi3d > 0)"
             n_skip = int((df.get("skip_reason", pd.Series(dtype=str))
                           .fillna("").astype(str).str.len() > 0).sum())
 
             m1, m2, m3 = st.columns(3)
             m1.metric("Total slides", f"{n_total}")
-            m2.metric("Solved (phi3d > 0)", f"{n_ok}",
+            m2.metric(ok_label, f"{n_ok}",
                        f"{100*n_ok/max(n_total,1):.1f}%")
             m3.metric("Skipped", f"{n_skip}")
 
@@ -570,11 +611,13 @@ if out_dir and Path(out_dir).exists():
         cols = st.columns(2)
         if phi3d_png.exists():
             with cols[0]:
-                st.image(str(phi3d_png), caption="phi3d distribution",
+                st.image(str(phi3d_png),
+                          caption=f"{phi3d_png.stem.replace('_hist', '')} distribution",
                           use_container_width=True)
         if phi2d_png.exists():
             with cols[1]:
-                st.image(str(phi2d_png), caption="phi2d distribution",
+                st.image(str(phi2d_png),
+                          caption=f"{phi2d_png.stem.replace('_hist', '')} distribution",
                           use_container_width=True)
         if not (phi3d_png.exists() or phi2d_png.exists()):
             st.info("Histogram PNGs not found.")
@@ -592,9 +635,9 @@ if out_dir and Path(out_dir).exists():
         with ccsv[0]:
             _dl(results_csv, "results.csv", "text/csv")
         with ccsv[1]:
-            _dl(phi3d_csv, "phi3d_hist.csv", "text/csv")
+            _dl(phi3d_csv, phi3d_csv.name, "text/csv")
         with ccsv[2]:
-            _dl(phi2d_csv, "phi2d_hist.csv", "text/csv")
+            _dl(phi2d_csv, phi2d_csv.name, "text/csv")
 
         st.subheader("Shear-strength PMF (.mat)")
         st.caption(
