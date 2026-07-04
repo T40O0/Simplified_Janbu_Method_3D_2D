@@ -161,8 +161,59 @@ DIS = IS_RUNNING
 
 st.sidebar.title("Simplified Janbu 3D/2D")
 st.sidebar.caption("Back-analyse phi or c, then forward-check FS in 2D.")
+
+# While a run is alive, do NOT build the full (disabled) input sidebar. Doing
+# so on every 1-second poll re-instantiates ~30 widgets with their `disabled`
+# state flipped, which triggers a Streamlit expander-rendering glitch: widgets
+# from the "Seismic / external loads" expander leak into the "Unit weights /
+# pore pressure" one. Render a compact locked sidebar plus the live progress
+# view instead, then rerun (execution never reaches the input widgets).
 if IS_RUNNING:
-    st.sidebar.caption("Locked while running")
+    st.sidebar.info("A run is in progress. Inputs are locked; use **Stop** "
+                    "on the right to cancel.")
+    st.title("Simplified Janbu 3D/2D - Back Analysis")
+
+    log_path = Path(_manifest["log_path"])
+    out_dir_active = Path(_manifest.get("out_dir", ""))
+    start_time = float(_manifest.get("start_time", time.time()))
+    elapsed = max(0.0, time.time() - start_time)
+    recent = tail_log(log_path, max_lines=80)
+
+    st.error("Computing - sidebar is locked. The subprocess keeps running "
+             "even if you close the browser.", icon="⚠️")
+    cols = st.columns([4, 1])
+    with cols[0]:
+        st.info(f"Running ({elapsed:.0f} s elapsed) - PID "
+                f"{_manifest['pid']} -> `{out_dir_active.name}/`")
+    with cols[1]:
+        if st.button("Stop", type="secondary", use_container_width=True,
+                      key="stop_btn"):
+            kill_pid(_manifest.get("pid"))
+            _clear(MANIFEST_PATH)
+            st.session_state.last_status = ("error", "Stopped by user")
+            st.rerun()
+
+    # Lightweight progress: parse "Processing slide X/Y" from the log tail.
+    n_done, n_total = 0, 0
+    for ln in reversed(recent):
+        if "Processing slide" in ln:
+            try:
+                seg = ln.split("Processing slide", 1)[1].strip()
+                a, b = seg.split("(")[0].split("/")
+                n_done = int(a.strip())
+                n_total = int(b.strip())
+                break
+            except Exception:
+                pass
+    if n_total:
+        st.progress(min(0.999, n_done / n_total), text=f"Slide {n_done}/{n_total}")
+    else:
+        st.progress(0.0, text="(starting up)")
+
+    st.code("\n".join(recent) if recent else "(waiting for output...)",
+            language="text")
+    time.sleep(1.0)
+    st.rerun()
 
 
 # ---- Input file pickers ----------------------------------------------------
@@ -471,73 +522,33 @@ if start and not IS_RUNNING:
     st.rerun()
 
 
-# ---- Running display -------------------------------------------------------
+# ---- Run finalisation ------------------------------------------------------
+# The live/alive view is handled at the top (see the IS_RUNNING short-circuit).
+# We only reach here with a manifest when the PID has already exited, so this
+# block just records the outcome and clears the manifest.
 if _manifest is not None:
     log_path = Path(_manifest["log_path"])
     out_dir_active = Path(_manifest.get("out_dir", ""))
-    start_time = float(_manifest.get("start_time", time.time()))
-    elapsed = max(0.0, time.time() - start_time)
     recent = tail_log(log_path, max_lines=80)
-    alive = pid_alive(_manifest.get("pid"))
 
-    if alive:
-        st.error("Computing - sidebar is locked. The subprocess keeps "
-                  "running even if you close the browser.", icon="⚠️")
-
-        cols = st.columns([4, 1])
-        with cols[0]:
-            st.info(f"Running ({elapsed:.0f} s elapsed) - PID "
-                    f"{_manifest['pid']} -> `{out_dir_active.name}/`")
-        with cols[1]:
-            if st.button("Stop", type="secondary", use_container_width=True,
-                          key="stop_btn"):
-                kill_pid(_manifest.get("pid"))
-                _clear(MANIFEST_PATH)
-                st.session_state.last_status = ("error", "Stopped by user")
-                st.rerun()
-
-        # Lightweight progress: parse "Processing slide X/Y" from log.
-        n_done, n_total = 0, 0
-        for ln in reversed(recent):
-            if "Processing slide" in ln:
-                try:
-                    seg = ln.split("Processing slide", 1)[1].strip()
-                    a, b = seg.split("(")[0].split("/")
-                    n_done = int(a.strip())
-                    n_total = int(b.strip())
-                    break
-                except Exception:
-                    pass
-        if n_total:
-            st.progress(min(0.999, n_done / n_total),
-                        text=f"Slide {n_done}/{n_total}")
-        else:
-            st.progress(0.0, text="(starting up)")
-
-        st.code("\n".join(recent) if recent else "(waiting for output...)",
-                language="text")
-        time.sleep(1.0)
-        st.rerun()
-
+    # PID gone: figure out exit status from the last log lines.
+    done_line = next((l for l in recent if l.startswith("Elapsed time:")),
+                     None)
+    if done_line:
+        kind = "success"
+        msg = f"Done - {done_line.strip()} -> `{out_dir_active}`"
+        _write_json(LAST_PATH, {
+            "out_dir": str(out_dir_active),
+            "finished_at": time.time(),
+        })
     else:
-        # PID gone: figure out exit status from the last log lines.
-        done_line = next((l for l in recent if l.startswith("Elapsed time:")),
-                         None)
-        if done_line:
-            kind = "success"
-            msg = f"Done - {done_line.strip()} -> `{out_dir_active}`"
-            _write_json(LAST_PATH, {
-                "out_dir": str(out_dir_active),
-                "finished_at": time.time(),
-            })
-        else:
-            kind = "error"
-            msg = (f"Run ended unexpectedly (no 'Elapsed time:' line). "
-                   f"See `{log_path.relative_to(REPO).as_posix()}`.")
-        st.session_state.last_status = (kind, msg)
-        st.session_state.output_dir = out_dir_active
-        _clear(MANIFEST_PATH)
-        st.rerun()
+        kind = "error"
+        msg = (f"Run ended unexpectedly (no 'Elapsed time:' line). "
+               f"See `{log_path.relative_to(REPO).as_posix()}`.")
+    st.session_state.last_status = (kind, msg)
+    st.session_state.output_dir = out_dir_active
+    _clear(MANIFEST_PATH)
+    st.rerun()
 
 
 # ---- Status banner ---------------------------------------------------------
